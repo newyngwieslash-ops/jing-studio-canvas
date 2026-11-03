@@ -94,7 +94,7 @@ func BiblePrompt(title string, settings Settings, chapters []Chapter, maxChars i
 	fmt.Fprintf(&b, "作品：%s\n画幅：%s\n视觉风格：%s\n对白语言：%s\n章节总数：%d\n\n", title, settings.AspectRatio, firstNonEmpty(settings.StylePrompt, "写实电影感"), settings.Language, len(chapters))
 	b.WriteString(structuredSkillBlock("提取角色、道具与场景", skill))
 	b.WriteString("请输出：\n")
-	b.WriteString(`{"logline":"一句话卖点","tone":"整体基调","visualRules":"统一的画面规则（色调/光线/服化道年代）",` +
+	b.WriteString(`{"logline":"一句话卖点","tone":"整体基调","visualRules":"统一的画面规则（色调/光线/服化道年代，不要写画幅比例或横竖屏）",` +
 		`"characters":[{"name":"标准名","aliases":["别名/称呼"],"role":"主角/反派/配角","gender":"男/女","age":"年龄段",` +
 		`"description":"性格与身份","appearance":"可直接用于生图的外貌、发型、服装描述（中文，40-80字）","voice":"音色、语速与说话方式"}],` +
 		`"props":[{"name":"道具名","description":"用途与归属","appearance":"可直接用于生图的外形、材质、颜色描述"}],` +
@@ -271,14 +271,28 @@ func ScriptPrompt(ctx ScriptContext) string {
 // CastImagePrompt 按作品的参考图方案渲染角色或场景参考图提示词，作为后续镜头的身份锚点。
 func CastImagePrompt(assets AssetSettings, kind, name, appearance, stylePrompt, visualRules string) string {
 	assets = assets.Normalized()
-	style := firstNonEmpty(stylePrompt, "写实电影感")
-	if kind == "prop" {
-		return renderAssetTemplate(propPrompt, map[string]string{"道具名称": name, "道具设定": appearance, "项目画风": style, "画面规则": visualRules})
+	ratio := AssetImageRatio
+	if kind != "prop" && kind != "scene" {
+		ratio = assets.CharacterRatio
 	}
-	if kind == "scene" {
-		return renderAssetTemplate(assets.ScenePrompt, map[string]string{"场景名称": name, "场景设定": appearance, "项目画风": style, "画面规则": visualRules})
+	style := firstNonEmpty(sanitizeAssetFraming(stylePrompt, ratio), "写实电影感")
+	rules := sanitizeAssetFraming(visualRules, ratio)
+	var rendered string
+	switch kind {
+	case "prop":
+		rendered = renderAssetTemplate(propPrompt, map[string]string{"道具名称": name, "道具设定": appearance, "项目画风": style, "画面规则": rules})
+	case "scene":
+		rendered = renderAssetTemplate(assets.ScenePrompt, map[string]string{"场景名称": name, "场景设定": appearance, "项目画风": style, "画面规则": rules})
+	default:
+		rendered = renderAssetTemplate(assets.CharacterPrompt, map[string]string{"角色名称": name, "角色设定": appearance, "项目画风": style, "画面规则": rules})
 	}
-	return renderAssetTemplate(assets.CharacterPrompt, map[string]string{"角色名称": name, "角色设定": appearance, "项目画风": style, "画面规则": visualRules})
+	if suffix := assetFramingSuffix(ratio); suffix != "" {
+		if !strings.HasSuffix(rendered, "。") && !strings.HasSuffix(rendered, ".") {
+			rendered += "。"
+		}
+		rendered += suffix
+	}
+	return rendered
 }
 
 func truncateRunes(value string, limit int) string {

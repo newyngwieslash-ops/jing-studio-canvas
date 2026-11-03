@@ -299,3 +299,23 @@ func TestSegmentWriterUsesSkill(t *testing.T) {
 		}
 	}
 }
+
+func TestCastImagePromptSanitizesConflictingFraming(t *testing.T) {
+	assets := AssetSettings{Mode: AssetModeFourView}.Normalized()
+	prompt := CastImagePrompt(
+		assets,
+		"character",
+		"莫兴",
+		"黑发青年，黑色哥特礼服",
+		"真人实拍短剧质感，竖屏构图主体突出，人物面部清晰",
+		"竖屏9:16，暗黑哥特2D动画，线条锐利、阴影浓重。",
+	)
+	if strings.Contains(prompt, "竖屏9:16") || strings.Contains(prompt, "竖屏构图主体突出") {
+		t.Fatalf("vertical framing rules must be stripped from 16:9 reference prompt:\n%s", prompt)
+	}
+	for _, want := range []string{"暗黑哥特2D动画", "人物面部清晰", "画幅要求：整张图为16:9横版（宽高比约1.78:1），不要做成超宽长条图，也不要做成竖图。"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}

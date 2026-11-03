@@ -82,16 +82,15 @@ func Run(ctx context.Context, request ProcessRequest, bridge Bridge) error {
 	if err != nil {
 		return fmt.Errorf("encode Agent runtime request: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "node", "--max-old-space-size="+nodeMemoryMB(), filepath.Join(runtimeDir, "agent-runtime.mjs"))
+	cmd, err := agentRuntimeCommand(ctx, runtimeDir)
+	if err != nil {
+		return err
+	}
 	cmd.Dir = runtimeDir
 	cmd.Stdin = strings.NewReader(string(payload))
 	// 环境变量白名单：只传 Node 运行所需的最少变量。HOME 与会话、工作目录
 	// 由运行时自己建的临时隔离目录提供，不使用服务端数据目录。
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"NODE_ENV=production",
-		"PI_OFFLINE=1",
-	}
+	cmd.Env = agentRuntimeEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("open Agent runtime output: %w", err)
@@ -300,6 +299,35 @@ func nodeMemoryMB() string {
 		return strconv.Itoa(parsed)
 	}
 	return "512"
+}
+
+func agentRuntimeCommand(ctx context.Context, runtimeDir string) (*exec.Cmd, error) {
+	scriptPath := filepath.Join(runtimeDir, "agent-runtime.mjs")
+	if nodePath, err := exec.LookPath("node"); err == nil {
+		return exec.CommandContext(ctx, nodePath, "--max-old-space-size="+nodeMemoryMB(), scriptPath), nil
+	}
+	if bunPath, err := exec.LookPath("bun"); err == nil {
+		return exec.CommandContext(ctx, bunPath, scriptPath), nil
+	}
+	return nil, errors.New("start Agent runtime: neither node nor bun executable found in PATH")
+}
+
+func agentRuntimeEnv() []string {
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"NODE_ENV=production",
+		"PI_OFFLINE=1",
+		"NO_PROXY=127.0.0.1,localhost,::1",
+		"no_proxy=127.0.0.1,localhost,::1",
+	}
+	if runtime.GOOS == "windows" {
+		for _, key := range []string{"SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "TEMP", "TMP"} {
+			if val := os.Getenv(key); val != "" {
+				env = append(env, key+"="+val)
+			}
+		}
+	}
+	return env
 }
 
 func firstNonEmpty(values ...string) string {

@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"yingce/backend/internal/database"
 	"yingce/backend/internal/model"
 	"yingce/backend/internal/production"
+	"yingce/backend/internal/repository"
 )
 
 // fakeDramaModels uses a persisted capability contract; only upstream execution is replaced.
@@ -28,7 +30,8 @@ type fakeDramaBackend struct {
 	byKind   map[string]int
 	renders  []renderProject
 	requests []CreateTaskRequest
-	fail     func(req CreateTaskRequest) bool
+	fail      func(req CreateTaskRequest) bool
+	imageSize func(req CreateTaskRequest) (int, int)
 }
 
 func (f *fakeDramaBackend) resource(userID, kind, mime string) string {
@@ -80,6 +83,9 @@ func (f *fakeDramaBackend) submit(userID string, req CreateTaskRequest, timeline
 				width, height = int(1080*ratio), 1080
 			}
 		}
+		if f.imageSize != nil {
+			width, height = f.imageSize(req)
+		}
 		result = map[string]any{"mode": "image", "images": []any{map[string]any{"resourceId": f.resourceSized(userID, "image", "image/png", width, height)}}}
 	case "canvas_video":
 		f.byKind["video"]++
@@ -99,7 +105,15 @@ func (f *fakeDramaBackend) submit(userID string, req CreateTaskRequest, timeline
 
 func newDramaTestService(t *testing.T) (*Service, *fakeDramaBackend) {
 	t.Helper()
-	svc, db := newTimelineTaskTestService(t)
+	dsn := fmt.Sprintf("file:%s_%d?mode=memory&cache=shared", t.Name(), time.Now().UnixNano())
+	db, err := database.Open(database.Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(database.Models()...); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	svc := &Service{repo: repository.New(db)}
 	fake := &fakeDramaBackend{t: t, db: db, byKind: map[string]int{}}
 	svc.dramaTaskHook = fake.submit
 	svc.dramaTailFrameHook = func(userID, resourceID string) (string, error) {
@@ -499,5 +513,43 @@ func TestDramaVideoOptionsReportRatiosAndAudio(t *testing.T) {
 	vertical.VideoContinuity = DramaContinuityParallel
 	if picked, ok := preferredDramaOption([]DramaModelOption{wide, parallelOnly}, vertical); !ok || picked.Choice.ChannelID != "vertical" {
 		t.Fatalf("a parallel vertical work must pick the vertical model: %+v %v", picked, ok)
+	}
+}
+
+func TestDramaRatioMismatchCastImageRetriesWithNewGeneration(t *testing.T) {
+	svc, fake := newDramaTestService(t)
+	fake.imageSize = func(CreateTaskRequest) (int, int) { return 941, 1672 }
+	project := createTestDrama(t, svc, DramaReviewAuto).Project.ID
+	runDramaTicks(t, svc, project, 12)
+	firstRunImages := fake.byKind["image"]
+	if firstRunImages == 0 {
+		t.Fatal("expected initial cast image generation")
+	}
+	casts, err := svc.repo.DramaCasts(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cast := range casts {
+		if cast.ImageStatus != model.DramaMediaFailed {
+			t.Fatalf("cast %s should fail ratio check, got %+v", cast.Name, cast)
+		}
+	}
+	// Fixing the image model/prompt and clicking Retry must dispatch new image tasks instead of replaying rejected 9:16 tasks.
+	fake.imageSize = nil
+	if _, err := svc.RetryFailedDrama("usr-drama", project); err != nil {
+		t.Fatal(err)
+	}
+	runDramaTicks(t, svc, project, 16)
+	if fake.byKind["image"] != firstRunImages*2 {
+		t.Fatalf("retry must submit a new image generation for each failed cast: got %d total, first run %d", fake.byKind["image"], firstRunImages)
+	}
+	casts, err = svc.repo.DramaCasts(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cast := range casts {
+		if cast.ImageStatus != model.DramaMediaReady || cast.ImageResourceID == "" {
+			t.Fatalf("cast %s should recover to ready after retry, got %+v", cast.Name, cast)
+		}
 	}
 }

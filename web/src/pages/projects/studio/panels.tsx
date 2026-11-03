@@ -67,6 +67,7 @@ const castImageFailed = (
 export function CastPanel({
     projectId,
     cast,
+    inbox = [],
     ratios,
     focusId,
     retrying,
@@ -81,6 +82,7 @@ export function CastPanel({
 }: {
     projectId: string;
     cast: DramaCast[];
+    inbox?: DramaInboxItem[];
     ratios: CastRatios;
     focusId: string;
     retrying: boolean;
@@ -97,6 +99,15 @@ export function CastPanel({
 }) {
     const [kind, setKind] = useState<DramaCastKind>("character");
     const [filter, setFilter] = useState<CastFilter>("all");
+    const castErrors = useMemo(() => {
+        const map = new Map<string, string>();
+        for (const item of inbox) {
+            if (item.kind === "cast_failed" && item.castId && item.detail) {
+                map.set(item.castId, item.detail);
+            }
+        }
+        return map;
+    }, [inbox]);
     const focused = cast.find((item) => item.id === focusId);
     useEffect(() => {
         if (focused) setKind(focused.kind);
@@ -165,7 +176,7 @@ export function CastPanel({
                                     {!item.imageResourceId || mediaBusy(item.imageStatus) || item.imageStatus === "failed" || item.imageStatus === "" ? (
                                         <div className={`drama-shot-placeholder ${mediaBusy(item.imageStatus) ? "is-busy" : ""}`}>
                                             {item.imageStatus === "failed" ? (
-                                                <span className="drama-cast-card-failed">
+                                                <span className="drama-cast-card-failed" title={castErrors.get(item.id)}>
                                                     <AlertCircle className="size-3.5" />
                                                     生成失败
                                                 </span>
@@ -201,7 +212,7 @@ export function CastPanel({
             </section>
             <aside className="drama-view-side thin-scrollbar">
                 {active ? (
-                    <CastEditor key={active.id} projectId={projectId} cast={active} ratios={ratios} onChanged={onChanged} onOpenCanvas={() => onOpenCanvas(active.id)} canvasOpening={canvasOpening === active.id} />
+                    <CastEditor key={active.id} projectId={projectId} cast={active} error={castErrors.get(active.id)} ratios={ratios} onChanged={onChanged} onOpenCanvas={() => onOpenCanvas(active.id)} canvasOpening={canvasOpening === active.id} />
                 ) : (
                     <div className="drama-empty is-compact">
                         <span>选择一个设定查看详情</span>
@@ -212,7 +223,7 @@ export function CastPanel({
     );
 }
 
-function CastEditor({ projectId, cast, ratios, onChanged, onOpenCanvas, canvasOpening }: { projectId: string; cast: DramaCast; ratios: CastRatios; onChanged: () => void; onOpenCanvas: () => void; canvasOpening: boolean }) {
+function CastEditor({ projectId, cast, error, ratios, onChanged, onOpenCanvas, canvasOpening }: { projectId: string; cast: DramaCast; error?: string; ratios: CastRatios; onChanged: () => void; onOpenCanvas: () => void; canvasOpening: boolean }) {
     const { message } = App.useApp();
     const [previewing, setPreviewing] = useState(false);
     const [name, setName] = useState(cast.name);
@@ -290,6 +301,11 @@ function CastEditor({ projectId, cast, ratios, onChanged, onOpenCanvas, canvasOp
                     </div>
                 ) : null}
             </div>
+            {cast.imageStatus === "failed" && error ? (
+                <p className="drama-sg-note is-error" role="alert">
+                    {error}
+                </p>
+            ) : null}
             <div className="drama-editor-row">
                 <span className="drama-eyebrow">{kindLabel}设定</span>
                 <label className="drama-switch-label">

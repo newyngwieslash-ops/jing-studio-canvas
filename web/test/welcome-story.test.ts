@@ -7,7 +7,7 @@ const publicFile = (url: string) => resolve(import.meta.dir, "../public", url.re
 
 describe("welcome story", () => {
     test("uses Yingce and only the three approved looks", () => {
-        expect(chapters[0].title).toBe("影策");
+        expect(chapters[0].title).toBe("晶电影工作室");
         expect(welcomeLooks.map((look) => look.id)).toEqual(["spring", "charge", "wing-it"]);
         expect(getWelcomeLook("").id).toBe("spring");
         expect(getWelcomeLook("?look=unknown").id).toBe("spring");

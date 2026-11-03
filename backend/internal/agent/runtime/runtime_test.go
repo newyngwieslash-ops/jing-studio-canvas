@@ -15,7 +15,9 @@ import (
 func fakeRuntime(t *testing.T, script string) {
 	t.Helper()
 	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("node is not installed")
+		if _, bunErr := exec.LookPath("bun"); bunErr != nil {
+			t.Skip("neither node nor bun is installed")
+		}
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "agent-runtime.mjs"), []byte(script), 0o600); err != nil {

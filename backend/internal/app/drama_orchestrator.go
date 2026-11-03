@@ -229,6 +229,8 @@ func (r *dramaRun) syncRunningJob(job *model.DramaJob) error {
 			}
 			var issue *dramaResultIssue
 			if errors.As(applyErr, &issue) {
+				recordDramaAttempt(job, task.ID, string(task.Status), issue.message, job.CostMicrocredits)
+				job.TaskID = ""
 				return r.failJob(job, issue.message)
 			}
 			return r.failJob(job, "结果处理失败（保留原任务，重试不重复生成）："+applyErr.Error())
@@ -323,8 +325,13 @@ func recordDramaAttempt(job *model.DramaJob, taskID, status, reason string, cost
 	var attempts []DramaJobAttempt
 	_ = json.Unmarshal([]byte(job.AttemptsJSON), &attempts)
 	if taskID != "" {
-		for _, attempt := range attempts {
+		for i, attempt := range attempts {
 			if attempt.TaskID == taskID {
+				if reason != "" {
+					attempts[i].Error = truncateRunes(reason, 500)
+					encoded, _ := json.Marshal(attempts)
+					job.AttemptsJSON = string(encoded)
+				}
 				return
 			}
 		}

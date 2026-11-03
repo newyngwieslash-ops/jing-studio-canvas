@@ -841,7 +841,7 @@ func (r *Repository) RequestDramaSegmentVideos(projectID, episodeID string, inde
 func (r *Repository) RetryDramaResultJobs(projectID string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		// A successful provider task is re-applied, never submitted a second time.
-		if err := tx.Model(&model.DramaJob{}).Where("project_id = ? AND status = ? AND task_id IN (?)", projectID, "failed", tx.Model(&model.Task{}).Select("id").Where("status = ?", model.TaskStatusSucceeded)).Updates(map[string]any{"status": "running", "error": "", "finished_at": nil}).Error; err != nil {
+		if err := tx.Model(&model.DramaJob{}).Where("project_id = ? AND status = ? AND error LIKE ? AND task_id IN (?)", projectID, "failed", "结果处理失败%", tx.Model(&model.Task{}).Select("id").Where("status = ?", model.TaskStatusSucceeded)).Updates(map[string]any{"status": "running", "error": "", "finished_at": nil}).Error; err != nil {
 			return err
 		}
 		return nil

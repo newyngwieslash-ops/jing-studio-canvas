@@ -18,7 +18,7 @@ const MODE_LABELS: Record<PrevisRenderMode, string> = { beauty: "预览", clay: 
 type ScreenDetailsLike = { screens: Array<{ isPrimary?: boolean; availLeft: number; availTop: number; availWidth: number; availHeight: number }> };
 const monitorSessions = new WeakMap<Window, () => void>();
 
-export function openPrevisMonitorWindow(input: { renderFrame: () => PrevisMonitorFrame | null; onClosed: () => void; fps?: number }): PrevisMonitorHandle {
+export function openPrevisMonitorWindow(input: { renderFrame: () => PrevisMonitorFrame | null; onClosed: () => void; fps?: number; brandName?: string }): PrevisMonitorHandle {
     // 同步打开：保住用户激活，避免被弹窗拦截。
     const popup = window.open("", "yingce-previs-monitor", "popup=yes,width=960,height=600");
     if (!popup) throw new Error("浏览器拦截了监看窗口，请允许本站弹出窗口后重试");
@@ -26,7 +26,7 @@ export function openPrevisMonitorWindow(input: { renderFrame: () => PrevisMonito
     monitorSessions.get(monitor)?.();
     const doc = monitor.document;
     doc.body.replaceChildren();
-    doc.title = "影策预演台 · 镜头监看";
+    doc.title = `${input.brandName || "晶电影工作室"}预演台 · 镜头监看`;
     // 独立文档拿不到主站 token，这里只用纯黑监看底色与白色文字。
     doc.body.style.cssText = "margin:0;background:#000;color:#fff;font:12px/1.4 system-ui,sans-serif;overflow:hidden;display:grid;place-items:center;height:100vh;";
     const canvas = doc.createElement("canvas");

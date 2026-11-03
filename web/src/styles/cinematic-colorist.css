@@ -1,0 +1,349 @@
+/* =========================================================================
+   Cinematic Colorist Dark (方案一：电影调色台 · 暗房级 OLED 精工风格)
+   -------------------------------------------------------------------------
+   独立主题覆盖层：只通过 CSS 变量与轻量表面质感重塑 UI 风格，不改动业务组件结构。
+   后续执行 `git pull` 拉取上游更新时，仅保留入口处 1 行 import 即可零冲突升级。
+   仅对默认皮肤（classic 或未指定 data-skin）生效，不影响后台自定义品牌皮肤。
+   ========================================================================= */
+
+:root:where([data-skin="classic"], :not([data-skin])) {
+    /* Cinema Daylight Studio (亮色模式：影棚日光控制台) */
+    --background: #f4f6fa;
+    --foreground: #0f172a;
+    --card: #ffffff;
+    --card-foreground: #0f172a;
+    --popover: #ffffff;
+    --popover-foreground: #0f172a;
+    --primary: #0f172a;
+    --primary-foreground: #ffffff;
+    --secondary: #eef1f6;
+    --secondary-foreground: #0f172a;
+    --muted: #eef1f6;
+    --muted-foreground: #64748b;
+    --accent: #e8ecf4;
+    --accent-foreground: #0f172a;
+    --border: rgba(15, 23, 42, 0.09);
+    --input: rgba(15, 23, 42, 0.09);
+    --ring: #e11d48;
+
+    --surface: #ffffff;
+    --surface-hover: #f1f4f9;
+    --surface-active: #e6ebf3;
+    --card-surface: #ffffff;
+    --card-surface-hover: #f8fafc;
+    --card-surface-raised: #ffffff;
+
+    --workspace-canvas: #eef1f6;
+    --workspace-page: #f4f6fa;
+    --workspace-navigation: #eef1f6;
+    --workspace-content: #f4f6fa;
+    --workspace-sidebar: #eef1f6;
+    --workspace-surface: #ffffff;
+    --workspace-surface-strong: #ffffff;
+    --workspace-surface-hover: #f1f4f9;
+    --workspace-border: rgba(15, 23, 42, 0.085);
+    --workspace-border-strong: rgba(15, 23, 42, 0.16);
+    --workspace-accent: #e11d48;
+    --workspace-accent-soft: rgba(225, 29, 72, 0.1);
+    --workspace-nav-active-bg: rgba(225, 29, 72, 0.09);
+    --workspace-nav-active-hover-bg: rgba(225, 29, 72, 0.14);
+
+    /* 主操作按钮：Cinema Play Crimson 影视放映红 */
+    --button-primary-bg: #e11d48;
+    --button-primary-hover-bg: #f43f5e;
+    --button-primary-active-bg: #be123c;
+    --button-primary-fg: #ffffff;
+    --button-primary-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.28),
+        0 1px 2px rgba(225, 29, 72, 0.24),
+        0 4px 12px rgba(225, 29, 72, 0.16);
+
+    --btn-solid-bg: var(--button-primary-bg);
+    --btn-solid-hover-bg: var(--button-primary-hover-bg);
+    --btn-solid-active-bg: var(--button-primary-active-bg);
+    --btn-solid-fg: var(--button-primary-fg);
+    --btn-solid-shadow: var(--button-primary-shadow);
+    --btn-solid-hover-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.34),
+        0 2px 4px rgba(225, 29, 72, 0.3),
+        0 8px 18px rgba(225, 29, 72, 0.22);
+    --btn-solid-active-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+
+    --button-secondary-bg: #ffffff;
+    --button-secondary-hover-bg: #f8fafc;
+    --button-secondary-active-bg: #f1f5f9;
+    --button-secondary-fg: #0f172a;
+    --button-secondary-border: rgba(15, 23, 42, 0.12);
+    --button-secondary-hover-border: rgba(15, 23, 42, 0.2);
+    --button-secondary-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+
+    /* 调色台信号色板（Rec.709 节点语义色） */
+    --palette-node-text: #7c3aed;
+    --palette-node-image: #d97706;
+    --palette-node-video: #e11d48;
+    --palette-node-audio: #0284c7;
+    --palette-node-script: #9333ea;
+    --palette-node-character: #e11d48;
+    --palette-node-frame: #059669;
+    --palette-node-skill: #ea580c;
+}
+
+:root:where([data-skin="classic"], :not([data-skin])) :is(.app-user-workspace, .app-user-overlays, .app-product-overlays) {
+    --user-page-bg: #f4f6fa;
+    --user-surface: #ffffff;
+    --user-surface-raised: #ffffff;
+    --user-surface-muted: #eaeef5;
+    --user-surface-hover: #e2e7f0;
+    --user-control-pressed: #d8dfe9;
+    --user-border: rgba(15, 23, 42, 0.09);
+    --user-border-strong: rgba(15, 23, 42, 0.16);
+    --user-ink: #0f172a;
+    --user-ink-muted: color-mix(in srgb, var(--user-ink) 68%, transparent);
+    --user-ink-soft: color-mix(in srgb, var(--user-ink) 52%, transparent);
+    --user-accent: #e11d48;
+    --user-accent-soft: rgba(225, 29, 72, 0.1);
+    --user-shadow-card: inset 0 0 0 1px rgba(15, 23, 42, 0.07), 0 1px 3px rgba(15, 23, 42, 0.04);
+    --user-shadow-hover: inset 0 0 0 1px rgba(15, 23, 42, 0.14), 0 8px 24px rgba(15, 23, 42, 0.07);
+    --user-card-hover: #ffffff;
+
+    --product-accent-blue: #2563eb;
+    --product-accent-green: #059669;
+    --product-accent-orange: #d97706;
+    --product-accent-pink: #e11d48;
+    --product-accent-violet: #7c3aed;
+    --product-accent-cyan: #0284c7;
+}
+
+/* =========================================================================
+   Dark Mode: Cinematic Colorist Dark (暗房级 OLED 监视器基准)
+   ========================================================================= */
+.dark:where([data-skin="classic"], :not([data-skin])) {
+    --background: #090a0f;
+    --foreground: #f1f5f9;
+    --card: #12141c;
+    --card-foreground: #f1f5f9;
+    --popover: #161924;
+    --popover-foreground: #f1f5f9;
+    --primary: #f1f5f9;
+    --primary-foreground: #090a0f;
+    --secondary: #151822;
+    --secondary-foreground: #f1f5f9;
+    --muted: #151822;
+    --muted-foreground: #94a3b8;
+    --accent: #1c202e;
+    --accent-foreground: #f1f5f9;
+    --border: rgba(226, 232, 240, 0.085);
+    --input: rgba(226, 232, 240, 0.085);
+    --ring: #f43f5e;
+
+    --surface: #12141c;
+    --surface-hover: #181c28;
+    --surface-active: #1f2433;
+    --card-surface: #12141c;
+    --card-surface-hover: #171b26;
+    --card-surface-raised: #1c202e;
+
+    --panel-surface: rgba(18, 20, 28, 0.92);
+    --floating-surface: rgba(22, 25, 36, 0.92);
+    --modal-surface: rgba(18, 20, 28, 0.96);
+    --dock-surface: rgba(14, 16, 24, 0.88);
+    --dock-border: rgba(226, 232, 240, 0.1);
+    --dock-command-hover: rgba(226, 232, 240, 0.08);
+
+    --workspace-canvas: #07080d;
+    --workspace-page: #090a0f;
+    --workspace-navigation: #0c0e15;
+    --workspace-content: #090a0f;
+    --workspace-sidebar: #0c0e15;
+    --workspace-surface: #12141c;
+    --workspace-surface-strong: #161924;
+    --workspace-surface-hover: #1c202e;
+    --workspace-border: rgba(226, 232, 240, 0.08);
+    --workspace-border-strong: rgba(226, 232, 240, 0.15);
+    --workspace-accent: #e11d48;
+    --workspace-accent-soft: rgba(225, 29, 72, 0.15);
+    --workspace-nav-active-bg: rgba(225, 29, 72, 0.14);
+    --workspace-nav-active-hover-bg: rgba(225, 29, 72, 0.2);
+
+    --control-selected-bg: rgba(225, 29, 72, 0.14);
+    --control-selected-border: rgba(244, 63, 94, 0.28);
+    --control-focus-ring: rgba(244, 63, 94, 0.45);
+
+    /* 主操作按钮：Cinema Play Crimson 影视放映红 + 顶部 1px 镜面内高光 */
+    --button-primary-bg: #e11d48;
+    --button-primary-hover-bg: #f43f5e;
+    --button-primary-active-bg: #be123c;
+    --button-primary-fg: #ffffff;
+    --button-primary-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.24),
+        0 1px 3px rgba(225, 29, 72, 0.36),
+        0 6px 18px rgba(225, 29, 72, 0.22);
+
+    --btn-solid-bg: var(--button-primary-bg);
+    --btn-solid-hover-bg: var(--button-primary-hover-bg);
+    --btn-solid-active-bg: var(--button-primary-active-bg);
+    --btn-solid-fg: var(--button-primary-fg);
+    --btn-solid-shadow: var(--button-primary-shadow);
+    --btn-solid-hover-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.32),
+        0 2px 6px rgba(225, 29, 72, 0.44),
+        0 10px 24px rgba(225, 29, 72, 0.28);
+    --btn-solid-active-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+
+    /* 次要按钮：暗房拉丝金属灰实体键 + 顶部微高光 */
+    --button-secondary-bg: #151822;
+    --button-secondary-hover-bg: #1c202e;
+    --button-secondary-active-bg: #10131b;
+    --button-secondary-fg: #f1f5f9;
+    --button-secondary-border: rgba(226, 232, 240, 0.11);
+    --button-secondary-hover-border: rgba(226, 232, 240, 0.2);
+    --button-secondary-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 1px 2px rgba(0, 0, 0, 0.42);
+
+    --button-tonal-bg: rgba(148, 163, 184, 0.09);
+    --button-tonal-hover-bg: rgba(148, 163, 184, 0.15);
+    --button-tonal-active-bg: rgba(148, 163, 184, 0.2);
+    --button-ghost-fg: rgba(226, 232, 240, 0.72);
+    --button-ghost-hover-fg: #f8fafc;
+    --button-ghost-hover-bg: rgba(148, 163, 184, 0.09);
+    --button-ghost-active-bg: rgba(148, 163, 184, 0.15);
+
+    /* 调色台信号色板（暗房高辨识度荧光色标） */
+    --palette-node-text: #a78bfa;
+    --palette-node-image: #f59e0b;
+    --palette-node-video: #e11d48;
+    --palette-node-audio: #38bdf8;
+    --palette-node-script: #c084fc;
+    --palette-node-character: #fb7185;
+    --palette-node-frame: #10b981;
+    --palette-node-skill: #fb923c;
+
+    /* 预演工作台（Previs / Sequencer）暗房监视器底色 */
+    --previs-workspace-bg: #07080d;
+    --previs-sequencer-surface: #0c0e15;
+    --previs-sequencer-surface-raised: #131621;
+    --previs-accent: #e11d48;
+    --previs-accent-hover: #f43f5e;
+}
+
+.dark:where([data-skin="classic"], :not([data-skin])) :is(.app-user-workspace, .app-user-overlays, .app-product-workspace, .app-product-overlays) {
+    --user-page-bg: #090a0f;
+    --user-surface: #12141c;
+    --user-surface-raised: #171a24;
+    --user-surface-muted: #151822;
+    --user-surface-hover: #1c202e;
+    --user-control-pressed: #232838;
+    --user-border: rgba(226, 232, 240, 0.085);
+    --user-border-strong: rgba(226, 232, 240, 0.16);
+    --user-ink: #f1f5f9;
+    --user-ink-muted: color-mix(in srgb, var(--user-ink) 68%, transparent);
+    --user-ink-soft: color-mix(in srgb, var(--user-ink) 50%, transparent);
+    --user-accent: #f43f5e;
+    --user-accent-soft: rgba(225, 29, 72, 0.15);
+    --user-shadow-card:
+        inset 0 1px 0 rgba(255, 255, 255, 0.045),
+        inset 0 0 0 1px rgba(226, 232, 240, 0.075);
+    --user-shadow-hover:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        inset 0 0 0 1px rgba(226, 232, 240, 0.15),
+        0 12px 32px rgba(2, 4, 10, 0.52);
+    --user-card-hover: #171b26;
+
+    --product-accent-blue: #60a5fa;
+    --product-accent-green: #34d399;
+    --product-accent-orange: #fbbf24;
+    --product-accent-pink: #fb7185;
+    --product-accent-violet: #c084fc;
+    --product-accent-cyan: #38bdf8;
+}
+
+/* =========================================================================
+   电影调色台界面精修细节（外壳分界线、导航胶囊、控制台高光、发送键）
+   ========================================================================= */
+
+/* 侧栏与主舞台之间采用 1px 暗房光学细线分割，替代硬编码灰底 */
+.dark:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .app-workspace-sidebar,
+.dark:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .app-workspace-sidebar-nav {
+    background: var(--workspace-sidebar) !important;
+}
+
+:root:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .app-workspace-sidebar {
+    border-right: 1px solid var(--user-border) !important;
+}
+
+:root:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .app-workspace-topbar {
+    border-bottom: 1px solid var(--user-border) !important;
+    background: color-mix(in srgb, var(--user-page-bg) 88%, transparent) !important;
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+}
+
+/* 侧栏选中胶囊：微弱放映红暖调环境光 + 顶部 1px 镜面反光（无左侧竖条） */
+.dark:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .app-workspace-nav-active-pill {
+    background: linear-gradient(180deg, rgba(225, 29, 72, 0.18) 0%, rgba(225, 29, 72, 0.08) 100%);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        inset 0 0 0 1px rgba(244, 63, 94, 0.22);
+}
+
+:root:where([data-skin="classic"], :not([data-skin])):not(.dark) .app-user-workspace .app-workspace-nav-active-pill {
+    background: rgba(225, 29, 72, 0.09);
+    box-shadow: inset 0 0 0 1px rgba(225, 29, 72, 0.16);
+}
+
+/* 创作控制台（Creation Composer）：精密调色台面板内高光与聚焦光晕 */
+.dark:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .creation-home {
+    background:
+        radial-gradient(1100px 420px at 50% 0%, rgba(225, 29, 72, 0.065), transparent 70%),
+        var(--user-page-bg) !important;
+}
+
+:root:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .creation-chat-composer {
+    background: var(--user-surface) !important;
+    box-shadow: var(--user-shadow-card) !important;
+}
+
+:root:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .creation-chat-composer:focus-within {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.09),
+        inset 0 0 0 1px color-mix(in srgb, var(--user-accent) 38%, var(--user-border-strong)),
+        0 14px 38px rgba(2, 4, 10, 0.36) !important;
+}
+
+/* 快捷灵感卡与内容库卡片：1px 光学内描边 + 暗房悬浮微高光 */
+:root:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .product-collection-card {
+    box-shadow: var(--user-shadow-card) !important;
+}
+
+:root:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .product-collection-card:is(:hover, :focus-within) {
+    background: var(--user-card-hover) !important;
+    box-shadow: var(--user-shadow-hover) !important;
+}
+
+.dark:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .creation-empty-suggest :is(.creation-hero-prompt, .suggest-card) {
+    background: rgba(18, 20, 28, 0.65) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), inset 0 0 0 1px rgba(226, 232, 240, 0.065) !important;
+}
+
+.dark:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .creation-empty-suggest :is(.creation-hero-prompt, .suggest-card):is(:hover, :focus-visible) {
+    background: var(--user-surface-hover) !important;
+    box-shadow: var(--user-shadow-hover) !important;
+}
+
+/* 创作台与画布节点发送键：激活时统一为 Cinema Play Crimson 放映红实心方键 */
+:root:where([data-skin="classic"], :not([data-skin])) .canvas-node-composer-submit:not(:disabled) .canvas-node-composer-submit-action {
+    background: var(--button-primary-bg) !important;
+    color: var(--button-primary-fg) !important;
+    box-shadow: var(--button-primary-shadow) !important;
+}
+
+:root:where([data-skin="classic"], :not([data-skin])) .canvas-node-composer-submit:not(:disabled):hover .canvas-node-composer-submit-action {
+    background: var(--button-primary-hover-bg) !important;
+}
+
+/* 顶栏积分数字与时间码：tabular-nums 监视器数值质感 */
+:root:where([data-skin="classic"], :not([data-skin])) .app-user-workspace .app-workspace-topbar-credit-pill strong {
+    font-family: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    letter-spacing: -0.02em;
+}

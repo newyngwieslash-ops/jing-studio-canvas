@@ -91,6 +91,7 @@ import { useAssetStore, type ModelAsset } from "@/stores/use-asset-store";
 import { usePrevisWorkbenchStore } from "@/stores/canvas/use-previs-workbench-store";
 import { PREVIS_MODES, previsModeCapabilities } from "@/lib/canvas/previs/previs-modes";
 import { useActiveTheme } from "@/stores/canvas/use-canvas-theme-store";
+import { useAppearanceStore } from "@/stores/use-appearance-store";
 import type { CanvasNodeData } from "@/types/canvas";
 import type { PrevisCameraMove, PrevisRenderMode, PrevisScene, PrevisSceneOutput, PrevisTransform, PrevisVec3 } from "@/types/previs";
 export { cameraMoveOptions, poseOptions, shotSizeOptions } from "./previs-inspectors";
@@ -120,6 +121,7 @@ export function CanvasPrevisWorkbench({
 }) {
     const { message, modal } = App.useApp();
     const theme = canvasThemes[useActiveTheme()];
+    const brandName = useAppearanceStore((state) => state.appearance.brandName);
     const effectiveCanvasId = useMemo(() => {
         const explicit = canvasId?.trim();
         if (explicit) return explicit;
@@ -1120,6 +1122,7 @@ export function CanvasPrevisWorkbench({
             surface = viewport.createShotSurface({ longEdge: 1920 });
             const activeSurface = surface;
             monitorRef.current = openPrevisMonitorWindow({
+                brandName,
                 renderFrame: () => {
                     const state = monitorStateRef.current;
                     if (!state.shot) return null;
@@ -1316,7 +1319,7 @@ export function CanvasPrevisWorkbench({
                     <X className="size-4" />
                 </button>
                 <div className="previs-desk-brand">
-                    <span className="previs-desk-logo">影策</span>
+                    <span className="previs-desk-logo">{brandName}</span>
                     <span className="previs-desk-brand-title">预演台</span>
                     <span className="previs-desk-brand-sub">AI 短剧预演</span>
                 </div>

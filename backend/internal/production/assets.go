@@ -211,3 +211,43 @@ func renderAssetTemplate(template string, values map[string]string) string {
 	rendered = strings.NewReplacer("。。", "。", "：。", "。").Replace(rendered)
 	return strings.TrimSpace(rendered)
 }
+
+var (
+	assetVerticalFramingPattern   = regexp.MustCompile(`(?:采用\s*)?(?:竖屏\s*9\s*[:：比]\s*16|9\s*[:：比]\s*16\s*竖[屏版](?:构图|画幅)?|竖[屏版]构图(?:主体突出)?|竖[屏版]画幅|竖画幅|9\s*[:：]\s*16\s*(?:画幅|构图)|竖屏|竖版)[，,、；;\s]*`)
+	assetHorizontalFramingPattern = regexp.MustCompile(`(?:采用\s*)?(?:横[屏版]\s*16\s*[:：比]\s*9|16\s*[:：比]\s*9\s*横(?:屏|版|画幅)(?:构图)?|横[屏版]构图|横[屏版]画幅|横画幅|16\s*[:：]\s*9\s*(?:画幅|构图)|横屏|横版)[，,、；;\s]*`)
+)
+
+// sanitizeAssetFraming 清理项目画风与画面规则中与参考图目标画幅冲突的横竖屏/比例词，
+// 避免竖屏剧集（9:16）的全局规则出现在末尾时把 16:9 横版参考图带偏成竖图。
+func sanitizeAssetFraming(text, ratio string) string {
+	cleaned := strings.TrimSpace(text)
+	if cleaned == "" {
+		return ""
+	}
+	switch ratio {
+	case "16:9", "4:3":
+		cleaned = assetVerticalFramingPattern.ReplaceAllString(cleaned, "")
+	case "9:16", "3:4":
+		cleaned = assetHorizontalFramingPattern.ReplaceAllString(cleaned, "")
+	}
+	cleaned = strings.NewReplacer("，，", "，", "，。", "。", "。，", "。", "、、", "、").Replace(cleaned)
+	return strings.Trim(cleaned, "，,、；; ")
+}
+
+// assetFramingSuffix 用文字重申整张图的宽高比。部分上游会忽略 size 参数、按提示词自选比例，
+// 多格横排的资产图容易被画成超宽长条，因此同时禁止过宽和反向画幅。
+func assetFramingSuffix(ratio string) string {
+	switch ratio {
+	case "16:9":
+		return "画幅要求：整张图为16:9横版（宽高比约1.78:1），不要做成超宽长条图，也不要做成竖图。"
+	case "4:3":
+		return "画幅要求：整张图为4:3横版（宽高比约1.33:1），不要做成超宽长条图，也不要做成竖图。"
+	case "9:16":
+		return "画幅要求：整张图为9:16竖版（宽高比约0.56:1），不要做成超长竖条图，也不要做成横图。"
+	case "3:4":
+		return "画幅要求：整张图为3:4竖版（宽高比约0.75:1），不要做成超长竖条图，也不要做成横图。"
+	case "1:1":
+		return "画幅要求：1:1正方画幅。"
+	}
+	return ""
+}

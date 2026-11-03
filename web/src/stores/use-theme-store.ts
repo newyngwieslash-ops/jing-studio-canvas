@@ -13,7 +13,7 @@ const VALID_THEMES: ThemeName[] = ["light", "dark"];
 export const useThemeStore = create<ThemeStore>()(
     persist(
         (set) => ({
-            theme: "light",
+            theme: "dark",
             // 写入前校验：非法 theme 直接忽略，防止 syncRemoteUserData 等路径绕过 merge 写入坏值
             setTheme: (next) => set((state) => (VALID_THEMES.includes(next) ? { theme: next } : state)),
         }),
@@ -25,7 +25,7 @@ export const useThemeStore = create<ThemeStore>()(
                 const stored = (persisted || {}) as Partial<ThemeStore>;
                 const theme = VALID_THEMES.includes(stored.theme as ThemeName)
                     ? (stored.theme as ThemeName)
-                    : "light";
+                    : "dark";
                 return { ...current, theme };
             },
         },

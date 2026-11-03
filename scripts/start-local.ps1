@@ -23,6 +23,22 @@ foreach ($directory in @($dataDir, $goBuildCache, $goModuleCache)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 
+$agentRuntimeDir = Join-Path $backendDir "agent-runtime\pi"
+$agentSdkDir = Join-Path $agentRuntimeDir "node_modules\@earendil-works\pi-coding-agent"
+if (-not (Test-Path -LiteralPath $agentSdkDir)) {
+    Write-Host "backend/agent-runtime/pi/node_modules 不存在，正在安装 Agent 运行时依赖..." -ForegroundColor Yellow
+    Push-Location $agentRuntimeDir
+    try {
+        & bun install --no-save
+        if ($LASTEXITCODE -ne 0) {
+            throw "Agent 运行时依赖安装失败。"
+        }
+    } finally {
+        Remove-Item -LiteralPath (Join-Path $agentRuntimeDir "bun.lock") -ErrorAction SilentlyContinue
+        Pop-Location
+    }
+}
+
 $viteBinary = Join-Path $webDir "node_modules\.bin\vite"
 if (-not (Test-Path -LiteralPath $viteBinary)) {
     Write-Host "web/node_modules 不存在，正在执行 bun install --frozen-lockfile..." -ForegroundColor Yellow
@@ -72,6 +88,7 @@ $backendCommand = @"
 Set-Location -LiteralPath $backendDirLiteral
 `$env:CANVAS_BACKEND_ADDR = '127.0.0.1:8080'
 `$env:CANVAS_BACKEND_DATA_DIR = $dataDirLiteral
+if (-not `$env:CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS) { `$env:CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS = '127.0.0.1,localhost' }
 `$env:GOCACHE = $(ConvertTo-PowerShellLiteral $goBuildCache)
 `$env:GOMODCACHE = $(ConvertTo-PowerShellLiteral $goModuleCache)
 Write-Host '影策后端：http://127.0.0.1:8080' -ForegroundColor Cyan
