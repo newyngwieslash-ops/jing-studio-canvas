@@ -46,49 +46,68 @@ func parseGitHubSkillURL(rawURL string, requestedRef string, requestedSubdir str
 
 func fetchGitHubSkillArchive(ctx context.Context, spec githubSkillSpec) (skillPackageArchive, string, string, string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	resolvedRef := spec.Ref
-	if resolvedRef == "" {
-		var repoInfo struct {
-			DefaultBranch string `json:"default_branch"`
+	resolvedRef := strings.TrimSpace(spec.Ref)
+	downloadRef := resolvedRef
+	if downloadRef == "" {
+		downloadRef = "HEAD"
+	}
+	data, err := downloadGitHubZip(ctx, client, spec.Owner, spec.Repo, downloadRef)
+	if err != nil {
+		return skillPackageArchive{}, "", "", "", err
+	}
+	commitSHA := extractGitHubZipCommit(data)
+	if commitSHA == "" {
+		if resolvedRef == "" {
+			var repoInfo struct {
+				DefaultBranch string `json:"default_branch"`
+			}
+			if err := githubJSON(ctx, client, fmt.Sprintf("https://api.github.com/repos/%s/%s", url.PathEscape(spec.Owner), url.PathEscape(spec.Repo)), &repoInfo); err != nil {
+				return skillPackageArchive{}, "", "", "", err
+			}
+			resolvedRef = repoInfo.DefaultBranch
 		}
-		if err := githubJSON(ctx, client, fmt.Sprintf("https://api.github.com/repos/%s/%s", url.PathEscape(spec.Owner), url.PathEscape(spec.Repo)), &repoInfo); err != nil {
+		var commitInfo struct {
+			SHA string `json:"sha"`
+		}
+		if err := githubJSON(ctx, client, fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", url.PathEscape(spec.Owner), url.PathEscape(spec.Repo), url.PathEscape(resolvedRef)), &commitInfo); err != nil {
 			return skillPackageArchive{}, "", "", "", err
 		}
-		resolvedRef = repoInfo.DefaultBranch
+		commitSHA = strings.TrimSpace(commitInfo.SHA)
 	}
-	var commitInfo struct {
-		SHA string `json:"sha"`
-	}
-	if err := githubJSON(ctx, client, fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", url.PathEscape(spec.Owner), url.PathEscape(spec.Repo), url.PathEscape(resolvedRef)), &commitInfo); err != nil {
-		return skillPackageArchive{}, "", "", "", err
-	}
-	if commitInfo.SHA == "" {
+	if commitSHA == "" {
 		return skillPackageArchive{}, "", "", "", errors.New("GitHub 未返回提交版本")
-	}
-	downloadURL := fmt.Sprintf("https://codeload.github.com/%s/%s/zip/%s", url.PathEscape(spec.Owner), url.PathEscape(spec.Repo), url.PathEscape(commitInfo.SHA))
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	request.Header.Set("User-Agent", outbound.DefaultOutboundUserAgent)
-	response, err := client.Do(request)
-	if err != nil {
-		return skillPackageArchive{}, "", "", "", fmt.Errorf("下载 GitHub 技能失败: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return skillPackageArchive{}, "", "", "", fmt.Errorf("下载 GitHub 技能失败: HTTP %d", response.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxSkillPackageBytes+1))
-	if err != nil {
-		return skillPackageArchive{}, "", "", "", err
-	}
-	if len(data) > maxSkillPackageBytes {
-		return skillPackageArchive{}, "", "", "", kernel.BadAuthRequest("GitHub 技能包超过 20MB")
 	}
 	archive, err := archiveFromZip(data, spec.Subdir)
 	if err != nil {
 		return skillPackageArchive{}, "", "", "", err
 	}
 	canonicalURL := fmt.Sprintf("https://github.com/%s/%s", spec.Owner, spec.Repo)
-	return archive, commitInfo.SHA, canonicalURL, resolvedRef, nil
+	return archive, commitSHA, canonicalURL, resolvedRef, nil
+}
+
+func downloadGitHubZip(ctx context.Context, client *http.Client, owner string, repo string, ref string) ([]byte, error) {
+	downloadURL := fmt.Sprintf("https://codeload.github.com/%s/%s/zip/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(ref))
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	request.Header.Set("User-Agent", outbound.DefaultOutboundUserAgent)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("下载 GitHub 技能失败: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil, kernel.BadAuthRequest("GitHub 仓库、分支或标签不存在，请检查仓库地址并确认仓库已公开")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("下载 GitHub 技能失败: HTTP %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxSkillPackageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxSkillPackageBytes {
+		return nil, kernel.BadAuthRequest("GitHub 技能包超过 20MB")
+	}
+	return data, nil
 }
 
 func githubJSON(ctx context.Context, client *http.Client, target string, output any) error {

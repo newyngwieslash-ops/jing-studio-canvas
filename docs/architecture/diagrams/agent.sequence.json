@@ -1,0 +1,29 @@
+{
+  "schema_version": 1, "diagram_type": "sequence",
+  "meta": { "title": "影策 · Agent 推理与审批续跑", "locale": "zh-CN", "quality_profile": "showcase", "column_fit": "spread", "viewBox": [1080, 570] },
+  "participants": [
+    { "id": "agent-ui", "type": "frontend", "label": "Agent 界面", "sublabel": "会话与审批" },
+    { "id": "go-agent", "type": "backend", "label": "Go 编排与桥接", "sublabel": "策略与持久化" },
+    { "id": "node-pi", "type": "backend", "label": "Node pi", "sublabel": "Agent 推理循环" },
+    { "id": "llm", "type": "external", "label": "文本模型", "sublabel": "后端渠道" }
+  ],
+  "messages": [
+    { "id": "start", "from": "agent-ui", "to": "go-agent", "y": 160, "label": "提交会话消息", "variant": "emphasis" },
+    { "id": "runtime", "from": "go-agent", "to": "node-pi", "y": 188, "label": "启动运行与上下文", "variant": "emphasis" },
+    { "id": "model-callback", "from": "node-pi", "to": "go-agent", "y": 216, "label": "/model 回调", "variant": "default" },
+    { "id": "model-request", "from": "go-agent", "to": "llm", "y": 244, "label": "渠道适配与模型请求", "variant": "default" },
+    { "id": "model-response", "from": "llm", "to": "go-agent", "y": 272, "label": "流式文本与工具意图", "variant": "return" },
+    { "id": "model-stream", "from": "go-agent", "to": "node-pi", "y": 300, "label": "转发模型事件", "variant": "return" },
+    { "id": "tool-callback", "from": "node-pi", "to": "go-agent", "y": 328, "label": "/tool 回调与策略检查", "variant": "security" },
+    { "id": "approval-event", "from": "go-agent", "to": "agent-ui", "y": 356, "label": "需要审批时推送事件", "variant": "dashed" },
+    { "id": "pause", "from": "go-agent", "to": "node-pi", "y": 384, "label": "返回 pause，中止本轮", "variant": "return" },
+    { "id": "checkpoint", "from": "node-pi", "to": "go-agent", "y": 412, "label": "暂停结束与上下文回存", "variant": "dashed" },
+    { "id": "approve", "from": "agent-ui", "to": "go-agent", "y": 440, "label": "用户批准", "variant": "security" },
+    { "id": "resume", "from": "go-agent", "to": "node-pi", "y": 468, "label": "执行后带回执恢复运行", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "violet", "title": "执行模式", "items": ["远程 HTTP 失败不回退嵌入 Node"] },
+    { "dot": "rose", "title": "拒绝分支", "items": ["拒绝直接终结，不继续工具或模型调用"] },
+    { "dot": "cyan", "title": "续跑时机", "items": ["媒体任务后台等待完成，再恢复 Pi"] }
+  ]
+}

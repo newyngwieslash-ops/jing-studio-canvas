@@ -1,9 +1,52 @@
 ---
-title: 待测试
+tit## 短剧制作：角色参考图脸部同质化
+- 已实现：资产提取（`BiblePrompt`）、分镜新增角色（`ScriptPrompt`）和外貌重写共用 `FaceSpecRule`：外貌先写脸型、眉眼鼻唇与记号再写服装，同类角色至少 3 处不同，群体角色按一名代表成员写脸；年龄要求具体岁数；`visualRules` 不得复述画风或写统一脸型。三个内置角色参考图模板改为角色名与设定在前、画风在后，并声明面部以角色设定为准。
+- 已实现：内置技能「短剧角色差异化提取」（`yingce-drama-face-differentiation`），可在作品设置的资产提取技能里选择。
+- 已实现：角色设定页新增「重写角色外貌」（批量）与角色详情里的「重写此角色外貌」（单个，其余角色作为对照写进提示词），沿用作品的资产提取技能，跳过已锁定角色；弹窗对比原外貌与新外貌，勾选后逐个写入，不自动重新生成参考图。新接口见 `http-api.mdx`。
+- 已修复：角色详情编辑器只按角色 ID 挂载，批量重写后右侧仍保留旧外貌，点「保存设定」或「重新生成」会把旧外貌写回（本地库里沈彻即如此）。现在外貌变化时编辑器重新挂载。
+- 已验证：`go test ./internal/production/ ./internal/app/ -run "Drama|Appearance"`、`go test ./internal/skills/ -run TestBuiltinFaceDifferentiationSkillLoads` 通过；`internal/handler` 与 `internal/skills` 的其余失败来自本机 `CGO_ENABLED=0`（go-sqlite3 需要 cgo），`TestYingshiBuiltinBundleCompatibility` 校验的是 `yingshi-drama-workshop` 文件树哈希，与本次改动无关，未处理。
+- [ ] 新建一部作品，核对提取出的角色外貌是否先写面部特征、年龄是否为具体岁数、同性别角色脸型是否不同；重新生成角色参考图，观察脸是否明显拉开。
+- [ ] 在已建好圣经的作品（如「浪人浮世绘」那部）角色页点「重写角色外貌」，确认已锁定角色不在列表里、群体角色有代表成员的脸、取消勾选的角色不被写入、应用后右侧详情立刻显示新外貌；再点「重新生成」，确认参考图提示词用的是新外貌。
+- [ ] 在角色详情点「重写此角色外貌」，确认弹窗只列出这一个角色，新脸与其他角色不同。
+- [ ] 作品设置选「短剧角色差异化提取」作为资产提取技能后新建作品，对比有无技能的提取结果。
+- [ ] 已保存模板的老作品不会自动采用新模板：在设置里点「恢复默认」后再重新生成角色参考图。
+le: 待测试
 description: 当前项目已实现功能的手工验证清单与未确认边界
 ---
 
 # 待测试
+
+## 角色资产图与远程资源图片返回页面加载
+
+- 已实现：有效 ready URL 复用（`resources.ts` 有界 500 条内存 LRU，绑定访问描述 `expiresAt`/`refreshAt` 与会话 `accessGeneration`）、有限刷新（每次挂载最多自动强刷恢复一轮，兼顾 `thumbnail -> original` 回退与跨实例新地址复用）、变体与会话隔离；不扩大应用位图缓存（保持 `canvas-image-loader.ts` 的 `16MP` / `60s` / `48` 对象 / `4` 并发不变）。
+- 已修复（边界复核）：取消或切账号后停止缩略图到原图的后续请求；每轮原图回退只尝试一次；同一轮重复图片错误事件不提前通知最终失败；资源访问持久缓存的读、删、写按账号与资源变体串行，已失效的排队操作不能开始，已开始的旧操作不能越过新会话写入。
+- 已验证：`cd web && bun test test/resource-image-recovery.test.ts test/canvas-image-geometry.test.ts test/canvas-media-performance.test.ts`（外层 43 pass / 0 fail，隔离子进程包含 24 项行为测试）、`bun run lint`、`bun run build` 通过。补充 11 项回归，并将强刷测试改为真实开始屏障、真实持久删除和延迟写入；组件测试实际派发跨实例错误与加载事件。
+- 此前源站实测记录：七牛 S3 源站（`yingce-dev.s3.cn-south-1.qiniucs.com`，`delivery="origin"`，`actualVariant="original"`）GET 响应头含 `Cache-Control: private, max-age=14400, immutable`，单张 3.03MB 原图 TTFB `1.79s`、总耗时 `4.25s~12.88s`；本轮未重复网络测速。真实桌面浏览器交互矩阵与生产 CDN 绑定仍待验收。
+- [ ] 16 张不同资源加载完成后切页返回，不重复出现应用加载占位。
+- [ ] 离开超过 60 秒、位图缓存淘汰、授权地址失效后行为符合预期。
+- [ ] 账号切换、缩略图回退、素材库与画布预览无回归。
+- [ ] 实际部署的首次冷加载及 CDN 冷暖缓存指标完成记录。
+- 边界：浏览器缓存未命中、ready 过期/淘汰时允许重新加载；不保证任意条件下首帧像素已绘制。持久存储操作若永久未决，同键后续操作仍会等待；本批未增加存储超时机制。
+
+## 架构与技术原理文档（Archify）
+
+- 已整理：架构总览、前端、后端任务与资源、Agent 与部署、短剧制作专题；系统架构、生成任务及 Agent 审批时序图。入口见 [架构总览](../architecture/index.mdx)。
+- 图表确定性校验、桌面浏览器检查、视觉审查和文件哈希分别记录在 [交付说明](../../../architecture/README.md)，不等同于产品业务验收。
+- [ ] 阅读者核对章节与当前产品体验；重点确认审批暂停/批准续跑/拒绝终结、任务取消、生成回存恢复和资源删除的合同差异。
+- [ ] 在具备账号、模型和部署环境时，另做真实生成、SSE 重连、跨账号隔离、远程 Agent、OSS 与更新回滚验收；本次仅制作文档和图表，未执行这些业务场景。
+
+## GitHub 技能安装与同步：免 REST API 配额直连归档与多技能套装识别
+- 已修复：`fetchGitHubSkillArchive` 此前在下载 ZIP 前需串行请求 2 次未鉴权 `https://api.github.com/repos/{owner}/{repo}` 与 `/commits/{ref}`；在共享出口 IP（如代理 TUN 模式）触发 GitHub 匿名 REST API 60 次/小时限流（HTTP 403）时，会统一包装为 502 `GitHub 技能读取失败，请检查仓库地址和网络`。现在直接从 `https://codeload.github.com/{owner}/{repo}/zip/{ref}`（未指定分支时使用 `HEAD`）拉取归档，并从归档 central directory comment 或顶层目录名提取 40 位 commit SHA，仅在归档未携带 SHA 时回退查询 REST API；同时将 `codeload.github.com` 的 HTTP 404 映射为明确的 400 提示。
+- 已修复：像 `lixiaoxiao9888-create/manju-laoli-skill`（1 总控 `short-drama-director/SKILL.md` + 12 子技能 `sd-*-engine/SKILL.md`）这类多技能套装仓库，此前不填子目录会报 `技能包包含多个 SKILL.md，请指定单个技能目录`，填写 `short-drama-director` 又会裁掉同级 12 个子技能目录导致总控内相对引用失效。现在 `normalizeSkillArchiveRoot` 在检测到多个 `SKILL.md` 时自动识别双向互引的唯一总控目录，将总控目录内文件提升至技能包根路径并完整保留同级子技能目录与共享资源；同时支持解析 YAML frontmatter 顶层 `version` 字段。
+- 已修复：`archiveFromZip` 在导入 ZIP 技能包时自动跳过超过 8MB 且非 Agent 可读（非 `.md`/`.txt`/`.json`）的二进制大附件（如演示视频、高清图或 PDF），避免因无用附件阻断技能安装；超过 8MB 的 `.md`/`.txt`/`.json` 文本文件仍保持拦截。
+- 已验证：`go test -v ./internal/skills -run "TestArchiveFrom|TestSkillMetadata|TestExtractGitHubZipCommit|TestParseGitHubSkillURL"` 通过。
+- [ ] 在技能页「安装技能 → GitHub」输入 `https://github.com/lixiaoxiao9888-create/manju-laoli-skill`（分支与子目录留空），确认成功安装为 `short-drama-director`（版本 `7.4.26`），且文件列表中同时包含根级 `SKILL.md`、`references/*`、`scripts/*` 及 12 个 `sd-*-engine/*` 子技能目录。
+- [ ] 在技能页「安装技能 → ZIP 技能包」上传内含 `>8MB` 演示视频或大附件的 ZIP 技能包（如 `曹三观最新做skill整活-AI导演旗舰版-v3.23.17.zip`），确认自动跳过超大非文本附件并安装成功。
+
+## 视频生成参考素材：启用对象存储后历史本地资源按需同步签发
+- 已修复：启用 OSS（如七牛云 Kodo）前已保存在本地存储的历史参考素材（`provider = "local"`），在未配置 `CANVAS_PUBLIC_BASE_URL` 或本地公网访问地址时用于 `newapi-channel-1` 等要求公网 URL 的视频生成任务，会因仍走本地签名路径报错“服务器本地存储尚未配置服务器访问地址”。现在 `providerResourceURL` 在本地签名缺少公网根地址且当前账号或平台已启用对象存储时，按需将本地参考资源上传并原子切换到当前对象存储位置，再签发对象存储预签名 URL。
+- 已验证：`go test -v ./internal/app -run TestVideoLocalReferencePromotesToActiveOSSWithoutPublicURL` 通过。
+- [ ] 重启后端后，在历史项目（如含早期本地参考图的短剧分镜）中重新点击「生成本段视频」，确认参考图自动同步至当前已启用的 OSS 并正常提交上游视频任务。
 ## 预演台：画幅比例选择与角色人偶缩略图
 - 已实现：视口工具条新增「画幅比例」入口，弹层提供自适应、2.39:1、21:9、16:9、4:3、1:1、3:4、9:16。选择后写入当前镜头并切到机位视图，安全框、CAM 角标、截图、白膜/深度录制与第二屏都按同一画幅输出；镜头检查器的「画幅」下拉同步为同一份选项。未设置画幅的旧镜头仍按 9:16。
 - 已实现：「自适应」按当前视口宽高比取景和输出；每次截图或录制在开始时读取一次视口比例并冻结，录制中改变窗口大小不会改变视频尺寸。离线没有视口时回落 16:9。

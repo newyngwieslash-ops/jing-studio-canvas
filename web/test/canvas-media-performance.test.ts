@@ -11,7 +11,7 @@ import { CanvasNodeType, type CanvasNodeData } from "../src/types/canvas";
 import { detectVideoAudioTrack, detectVideoAudioTrackFromBlob, detectVideoAudioTrackFromUrl } from "../src/lib/video-poster";
 import { moduleGroupSource } from "./helpers/module-group-source";
 
-const canvasNodeContentSource = moduleGroupSource("components/canvas/canvas-node-content.tsx");
+const canvasNodeContentSource = moduleGroupSource("components/canvas/canvas-node-content.tsx").replace(/\r\n/g, "\n");
 const canvasAudioPlayerSource = readFileSync(resolve(import.meta.dir, "../src/components/canvas/canvas-audio-player.tsx"), "utf8");
 const canvasMentionSource = moduleGroupSource("components/canvas/canvas-resource-mention-textarea.tsx");
 const canvasNodeSource = readFileSync(resolve(import.meta.dir, "../src/components/canvas/canvas-node.tsx"), "utf8");
@@ -119,8 +119,8 @@ describe("large canvas media rendering", () => {
     });
 
     test("coalesces forced access refreshes already in flight", () => {
-        expect(resourceApiSource).toContain("const inFlightRefresh = accessRequests.get(key);");
-        expect(resourceApiSource).toContain("if (inFlightRefresh) return inFlightRefresh;");
+        expect(resourceApiSource).toContain("const pending = accessRequests.get(key);");
+        expect(resourceApiSource).toContain("if (pending && (!forceRefresh || pending.forceRefresh)) return pending.promise;");
     });
 
     test("reuses a cached full video Blob for poster capture before requesting playback access", () => {

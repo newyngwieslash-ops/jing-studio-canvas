@@ -183,6 +183,10 @@ handle 放错端点、格式错误或行 ID 不存在时，工具错误回执提
 
 当前自动签名能力：公开 CDN、七牛私有下载签名和对象存储源站签名。阿里云/腾讯云私有 CDN 签名尚未自动支持，不能仅填写 CDN 域名就宣称已命中 CDN。真实 CORS、Range、CDN 命中率及账单收益必须在实际云环境通过浏览器网络记录和服务端流量观测验收。
 
+前端展示地址（`purpose="display"`）在内存访问缓存与按账号隔离的持久缓存之上，另维护最多 500 条仅内存的已准备展示地址记录（ready URL），只保存字符串与过期时间标量，不替代后端授权且不扩大解码位图缓存。`forceRefresh` 强制绕过内存与持久展示地址缓存并合并同键并发刷新，但在同一签名时间窗内服务端仍可能返回相同 URL；`variant="thumbnail"` 在缩略图未生成时仍可能回落返回原图。浏览器 HTTP 缓存、前端 ready 地址记录与画布解码位图缓存属于不同层级，互不替代。
+
+持久展示地址的读取、过期清理、强刷删除与结果写入按账号及资源变体串行。会话失效时，尚未开始的操作会被拒绝；已开始的存储事务不能撤销，因此其后同键的新会话写入等待旧事务结束，避免旧删除或写入覆盖新值。网络请求超时不等于持久存储超时；存储永久未决时同键后续操作仍可能等待。
+
 ## AI 拆图视觉规划输入
 
 文本生成任务的 `metadata.edit = "layer-planning"` 使用图片参考时，服务端从当前用户归属的就绪资源读取实际像素并转换为内嵌图片，清除附带的旧 URL。图片数量与字节数沿用文本模型能力及资源读取上限；不允许其他用户资源或客户端内嵌内容替换资源文件。普通生成的签名 URL 策略保持不变，任务端点、账务与数据库结构沿用已有合同。
@@ -759,6 +763,7 @@ install 的 Base URL、协议、能力和成本全部从服务端快照读取，
 | `GET /dramas/:id/cast` · `PATCH /dramas/:id/cast/:castId` | 读取 / 修改角色、道具与场景设定（名称、别名、外观、声线、锁定） |
 | `PUT /dramas/:id/cast/:castId/image` | `{ resourceId, restyleSegments, source?, taskId? }` 用当前用户已就绪的图片资源替换参考图并锁定：取消排队中的生图，写入版本记录；锁定的参考图生成剧情段视频时随请求发送，并在参考图说明里标明形象以图片为准。`source` 为 `upload`（默认）或 `canvas`（从精修画布采用），`taskId` 是产出这张图的画布任务，校验属于当前用户且结果包含该资源，否则忽略。同一资源已是当前且已锁定时不重复写版本，返回 `unchanged: true`。返回 `{ cast, affectedSegments, unchanged? }` |
 | `GET /dramas/:id/cast/:castId/impact` · `POST …/regenerate` | 预览引用该设定的集数与剧情段数 `{ episodes, segments }`；重新生成参考图，`restyleSegments=true` 时引用它、且已生成或生成中的剧情段视频标记过期（段提示词只引用参考图编号，保持不变），返回实际受影响的 `{ affectedSegments }` |
+| `POST /dramas/:id/cast/appearance-rewrite` · `GET …/appearance-rewrite/:taskId` | 角色外貌重写：按作品的资产提取技能（没有则内置规则）为未锁定的角色生成新外貌建议（群体角色按一名代表成员写脸）。POST 请求体 `{ castId }`，`castId` 为空表示全部角色，非空时只重写该角色并把其余角色作为对照；只创建文本任务，返回 `{ taskId, skillName }`；GET 校验任务属于当前用户与该作品，返回 `{ status: running/succeeded/failed, error?, proposals: [{ castId, name, before, after }] }`，对不上角色名、与现有外貌相同的结果被丢弃。建议只读，前端确认后逐个走 `PATCH …/cast/:castId` 写入，不自动重新生成参考图 |
 | `POST /dramas/:id/cast/regenerate-all` | 按当前参考图方案重做某一类（`kind` 为 character/prop/scene）全部未锁定的参考图，可选 `restyleSegments` |
 | `GET /dramas/:id/canvas` | 作品的精修画布：`canvasId` 为最近更新的关联画布（`canvas_projects.project_id` 等于作品 ID），没有时为空串，由前端新建画布并写入关联；`canvasCount` 为关联画布数 |
 | `POST /dramas/:id/canvas-assets` | `{ resources: [{ resourceId, title?, category? }] }`（1–64 项）为投送到画布的短剧媒体登记素材记录：画布保存要求媒体节点由当前用户的素材引用资源。素材 ID 由资源确定（`drama-<resourceId>`），同一资源只登记一次，只建素材入口不复制媒体。不存在、未就绪或不是图片/视频的资源跳过、不让整批失败；返回 `{ assets: [{ resourceId, assetId }] }`，缺少的资源由前端决定是否中止投送 |

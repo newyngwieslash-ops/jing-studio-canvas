@@ -34,6 +34,7 @@ import { progressFillStyle } from "@/lib/progress-fill";
 import { uploadResourceFile } from "@/services/api/resources";
 import { DramaTakeList } from "./take-list";
 import { CastLibraryPicker } from "./cast-library-picker";
+import { AppearanceRewriteButton } from "./appearance-rewrite";
 
 // 制作台的三个整页视图：设定（角色 / 道具 / 场景）、待处理、制作设置。都在主区域内展示，不使用抽屉遮挡。
 
@@ -149,8 +150,9 @@ export function CastPanel({
                             </button>
                         ))}
                     </div>
+                    {kind === "character" ? <AppearanceRewriteButton projectId={projectId} className="!ml-auto" onChanged={onChanged} /> : null}
                     {failed ? (
-                        <Button className="!ml-auto" icon={<RotateCcw className="size-4" />} loading={retrying} onClick={onRetry}>
+                        <Button className={kind === "character" ? "" : "!ml-auto"} icon={<RotateCcw className="size-4" />} loading={retrying} onClick={onRetry}>
                             重试失败的 {failed} 个
                         </Button>
                     ) : null}
@@ -212,7 +214,8 @@ export function CastPanel({
             </section>
             <aside className="drama-view-side thin-scrollbar">
                 {active ? (
-                    <CastEditor key={active.id} projectId={projectId} cast={active} error={castErrors.get(active.id)} ratios={ratios} onChanged={onChanged} onOpenCanvas={() => onOpenCanvas(active.id)} canvasOpening={canvasOpening === active.id} />
+                    // 外貌被「重写角色外貌」等外部操作改掉后重新挂载，否则编辑器里的旧文本会在保存或重新生成时把新外貌写回去。
+                    <CastEditor key={`${active.id}:${active.appearance}`} projectId={projectId} cast={active} error={castErrors.get(active.id)} ratios={ratios} onChanged={onChanged} onOpenCanvas={() => onOpenCanvas(active.id)} canvasOpening={canvasOpening === active.id} />
                 ) : (
                     <div className="drama-empty is-compact">
                         <span>选择一个设定查看详情</span>
@@ -325,6 +328,7 @@ function CastEditor({ projectId, cast, error, ratios, onChanged, onOpenCanvas, c
             <Field label={APPEARANCE_LABEL[cast.kind]} hint="用于参考图与剧情段视频提示词">
                 <Input.TextArea value={appearance} autoSize={{ minRows: 4, maxRows: 10 }} onChange={(event) => setAppearance(event.target.value)} aria-label={APPEARANCE_LABEL[cast.kind]} />
             </Field>
+            {isCharacter && !cast.locked ? <AppearanceRewriteButton projectId={projectId} cast={cast} className="w-full" onChanged={onChanged} /> : null}
             {isCharacter ? (
                 <Field label="声线" hint="写进视频提示词，由视频模型生成对白">
                     <Input value={voiceInstructions} placeholder="少年音，坚毅，语速偏快" onChange={(event) => setVoiceInstructions(event.target.value)} aria-label="声线" />

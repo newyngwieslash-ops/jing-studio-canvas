@@ -1,0 +1,28 @@
+{
+  "schema_version": 1, "diagram_type": "sequence",
+  "meta": { "title": "影策 · 生成任务与结果回读", "locale": "zh-CN", "quality_profile": "showcase", "column_fit": "spread", "viewBox": [1080, 530] },
+  "participants": [
+    { "id": "canvas", "type": "frontend", "label": "创作前端", "sublabel": "生成任务消费者" },
+    { "id": "task-api", "type": "backend", "label": "任务 API", "sublabel": "身份与业务校验" },
+    { "id": "task-store", "type": "database", "label": "任务数据库", "sublabel": "状态与租约" },
+    { "id": "task-worker", "type": "backend", "label": "任务 Worker", "sublabel": "进程内执行" },
+    { "id": "upstream", "type": "external", "label": "模型上游", "sublabel": "协议适配" }
+  ],
+  "messages": [
+    { "id": "submit", "from": "canvas", "to": "task-api", "y": 160, "label": "提交生成任务", "variant": "emphasis" },
+    { "id": "persist", "from": "task-api", "to": "task-store", "y": 190, "label": "校验后持久化", "variant": "emphasis" },
+    { "id": "accepted", "from": "task-api", "to": "canvas", "y": 220, "label": "返回任务记录", "variant": "return" },
+    { "id": "claim", "from": "task-worker", "to": "task-store", "y": 250, "label": "领取任务与租约", "variant": "emphasis" },
+    { "id": "invoke", "from": "task-worker", "to": "upstream", "y": 280, "label": "调用 / 轮询", "variant": "default" },
+    { "id": "result", "from": "upstream", "to": "task-worker", "y": 310, "label": "内容或失败", "variant": "return" },
+    { "id": "finalize", "from": "task-worker", "to": "task-store", "y": 340, "label": "受租约保护地写回", "variant": "emphasis" },
+    { "id": "observe", "from": "canvas", "to": "task-api", "y": 370, "label": "查询 / 文本 SSE", "variant": "default" },
+    { "id": "read-final", "from": "task-api", "to": "task-store", "y": 400, "label": "读取权威任务", "variant": "default" },
+    { "id": "display", "from": "task-api", "to": "canvas", "y": 430, "label": "状态、内容与资源引用", "variant": "return" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "观察与执行并行", "items": ["查询和文本 SSE 可在执行期间开始"] },
+    { "dot": "emerald", "title": "完成判据", "items": ["终态回读任务；断线按事件游标恢复"] },
+    { "dot": "amber", "title": "故障边界", "items": ["租约不保证外部上游恰好执行一次"] }
+  ]
+}

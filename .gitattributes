@@ -1,1 +1,4 @@
 plugin-packages/*.sh text eol=lf
+# Archify receipts bind exact bytes; keep source and HTML line endings stable.
+docs/architecture/diagrams/*.json text eol=lf
+docs/architecture/diagrams/*.html text eol=lf

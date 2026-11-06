@@ -1,0 +1,116 @@
+---
+title: 短剧制作领域与持续编排
+description: 从章节改编到剧情段视频、尾帧连续性、成片合成与画布精修的实际实现
+---
+
+短剧制作不是浏览器依次请求多个模型的临时流程。项目的制作状态、分集、镜头、剧情段、作业和产物版本均保存在数据库，由服务端循环推进；浏览器提交编辑、批准、放行和重试意图。视频生成的单位是 **DramaSegment（剧情段）**，一个剧情段可包含多个镜头，不能把这条流水线画成“每个镜头各生成一个视频”。
+
+本页以当前工作区实现为准。原有角色外貌改写相关未提交修改未由本次任务变更，也不据此宣称它们已稳定发布。
+
+## 1. 领域模型与事实归属
+
+结构与状态枚举集中在 [`models_drama.go`](../../../../backend/internal/model/models_drama.go)：
+
+| 对象 | 保存什么 | 与其他对象的关系 |
+| --- | --- | --- |
+| ProjectUnit（chapter） | 导入章节原文 | 是改编输入，不是后续视频产物的主键 |
+| DramaProduction | 项目唯一制作控制面、设置、作品圣经、预算、已用积分、规划游标、暂停原因 | 以 ProjectID 为主键，驱动整个项目 |
+| DramaCast | 角色/场景/道具设定、别名、外貌、声线、参考图、锁定和 revision | 镜头/剧情段引用同一设定，减少形象漂移 |
+| DramaEpisode | 分集信息、章节引用、来源格式、阶段、审批、媒体放行、成片与 revision | 后续剧本、分镜、段视频的组织基石 |
+| DramaShot | 台词、动作、景别、运镜、时长、设定引用、SegmentIndex | 是段提示词素材，不持有独立视频槽位 |
+| DramaSegment | 整段提示词、人工覆盖、模型覆盖、参考图顺序、视频和尾帧 | 一段对应一次视频生成请求 |
+| DramaJob | 工作种类、优先级、当前 TaskID、历次请求、费用与错误 | 业务调度队列；派发时才创建通用 Task |
+| DramaTake | 参考图、段视频或成片的产物版本 | 保存 ResourceID、TaskID、提示词和时长供回看/采用 |
+
+Job.Kind 包括 bible、plan、cast_image、script、segment_prompt、segment_video、render。历史字段 `DramaJob.ShotID` 在 segment_prompt/segment_video 作业中实际存放 **segment ID**，阅读查询、日志或接口时不能按字段名误判为镜头 ID。
+
+普通 Task 负责模型调用、租约、账单和媒体回存；DramaJob 负责该调用对制作流程意味着什么。两者不是重复队列，而是业务编排与通用执行两个层次，通用执行机制见 [后端任务原理](./backend.mdx)。
+
+## 2. 服务端调度：syncJobs → plan → dispatch
+
+[`drama_orchestrator.go`](../../../../backend/internal/app/drama_orchestrator.go) 的 `startDramaScheduler` 使用唤醒信号和 3 秒 ticker。每轮查询最多 20 个待推进项目，通过 coordinator 申请 `drama:<projectID>` 单槽租约，租期 2 分钟，再进入 `tickDrama`。它用于避免普通运行条件下多个实例同时推进同项目；不能由固定 TTL 推断任意长 tick 都已获得无限期互斥保障。
+
+1. **syncJobs**：读取 queued/running 作业，查询已派发 Task 的状态，处理成功结果和失败原因，汇总账单花费，建立当前活动作业键集合。
+2. **plan**：依据业务对象现状推导缺少的工作，以 kind/episode/segment/cast 组合键避免重复排队，将新作业保存。
+3. **dispatch**：优先级降序提交，受项目并发、通用账号并发、预算和积分限制，记录 TaskID 后将作业及媒体槽位改成运行中。
+
+同步账单或 Task 的临时读取错误会延后本作业至下轮，不应被解释为“任务不存在”或零费用。只有明确的记录不存在才走丢失任务处理。`AttemptsJSON` 记录历史请求，已记录的 Task 不重复计入项目花费。
+
+暂停项目仍执行 `syncJobs`，因为已经发出的任务可能完成，需要入库、更新视频和抽取尾帧；暂停不会撤回第三方已接受的请求。非 running 状态不继续执行 plan/dispatch。
+
+## 3. 从输入到分集、分镜和段提示词
+
+总体阶段为 bible → produce → done；单集阶段为 queued → script → prompts → review → video → render → done。
+
+- bible 作业从输入建立作品圣经与角色/场景等设定。
+- 分集支持按章直接分组或文本模型规划。规划维护 PlanCursor/PlanDone，分批处理章节，避免每次重新规划全书。
+- SourceFormat 区分 novel、script、storyboard。小说需要改编；已有剧本/分镜沿不同解析路径处理。`applyDirectStoryboard` 可以直接写入用户分镜，不必为每种输入都调用剧本生成。
+- `applyScriptShots` 写入镜头与段结构，`assignDramaSegments` 调用纯逻辑 `SegmentShotsForVideo` 按场景/时长及模型单次时长约束分段。
+- 每段随后安排 segment_prompt 作业，依据该段镜头表生成完整视频提示词；VideoPromptOverride 非空时优先使用人工文本。
+
+纯解析、分镜、时间计算和提示词组织位于 [`internal/production`](../../../../backend/internal/production/timing.go)，领域算法不直接承担 HTTP 或队列持久化。模型可接受时长、画幅、参考图容量等由 [`drama_models.go`](../../../../backend/internal/app/drama_models.go) 读取能力合同，不能硬编码假设所有视频模型支持相同参数。
+
+段提示词字符预算会扣除提交时追加的参考图说明；过长结果可在同一作业中继续发起精简任务，并记录前次 Task 花费。作业成功不是只看文本模型返回成功，还要经过结果解析、版本与可执行性检查。
+
+## 4. 审阅、媒体放行与预算
+
+[`drama_actions.go`](../../../../backend/internal/app/drama_actions.go) 将修改设置、继续制作、逐集批准、媒体放行与重试落实为业务状态更新。
+
+| 控制 | 对调度的影响 |
+| --- | --- |
+| 手动媒体模式 | AssetsReleased 控制参考图自动生成；Episode.MediaReleased 控制该集媒体放行 |
+| 每集审阅 | Episode.Approved 表示视频提示词已批准，正常阶段推进在 review 等待 |
+| 样片审阅 | 第 1 集先制作；SampleApproved 前阻止其他集进入受控视频生成 |
+| 显式逐段生成 | 已有可执行提示词的段可在全集提示词尚未全部完成时被明确请求；仍受等待条件约束 |
+| 项目并发 | settings.Concurrency 减去当前 running 作业数决定本轮派发容量 |
+| 预算 | 累计制作花费加关联画布精修花费达到上限后暂停新派发 |
+
+手动媒体模式不阻止先写剧本与段提示词，文本工作可以先完成供审阅。等待媒体放行的集不按相同方式占用制作窗口；当前同时推进的普通单集窗口常量为 6。
+
+预算检查主要基于**已经汇总的花费**，并非为每条即将发出的作业预先锁定剩余预算；不能将它宣传为所有并发在途任务都不会造成超预算的严格总额保证。账号实际扣费/预留仍由通用 Task 准入处理。预算为 0 表示此项目不设置该上限，不代表模型免费。
+
+`resumeDrama` 重新校验模型能力和总花费。提高预算可清除预算暂停原因，但不自动意味着所有暂停工作已恢复；继续制作或显式生成调用会进入恢复入口。当前 dispatch 还依据部分错误文案判断账号上限、积分不足与维护状态，这是实现现状，不是完整的结构化错误分类。
+
+## 5. 段视频与连续性
+
+[`drama_segment_video.go`](../../../../backend/internal/app/drama_segment_video.go) 的 `prepareDramaSegment` 被预览和实际提交共同使用，避免预览参考图编号与模型请求不一致。它根据模型能力生成时长、画幅、分辨率、音频选项、首帧和参考图数组。
+
+**尾帧续接模式**按段序推进：第 2 段起等待上一段视频 ready 且 TailFrameResourceID 存在，将上一段尾帧作为首帧参考，再合并本段角色/场景/道具参考。生成后的尾帧由 ffmpeg 提取并保存为图片资源。
+
+**并行出片模式**不带上一段尾帧，各段独立按设定参考图生成；满足条件的段可同时入队，由项目/账号/渠道并发限制实际速度。它提高并行度，但不能声称具有相同的逐段首尾帧连续性。
+
+`dramaVideoWaitReason` 与详情页共享等待原因，包括未运行、媒体未放行、样片未批准、上一段未完成、提示词未就绪、参考图仍在生成。参考图失败、锁定或未请求等情况可使用文字设定并给出限制说明；无法提供作品画幅时拒绝提交，避免花费后得到错误画幅。
+
+参考图容量受模型能力及用户设置共同限制；未发送的参考图会区分缺失与超限，并保留可解释编号。声线、台词与音效主要写入段视频提示词，由支持音频的视频模型实现，不能据此承诺独立 TTS 配音轨已经生成。
+
+## 6. 重试、版本和过期产物
+
+用户编辑只更新对应意图列，后台结果带 revision 条件写入，减少迟到结果覆盖新编辑。`episodeRewind` 把受影响的单集退回必要阶段，保留旧成片但标记 FinalStale；stale 视频不会仅因后台扫描就自动重新花费生成，需明确请求。
+
+失败重试区分“模型请求失败”和“已有付费结果但处理失败”。`RetryFailedDrama` 会重置相应槽位并恢复可重放结果作业；`ReprocessDramaSegmentVideo` 可对已有视频重新处理。尾帧抽取失败不应直接触发新的付费生成，原 TaskID 和视频资源用于恢复。
+
+结果读取暂时失败、模型成功但画幅不合格、媒体后处理失败，也分别进入不同分支。因此 Job 失败不能一律等同于上游未生成，更不能一律按零花费计账。
+
+## 7. Timeline 成片合成
+
+`buildDramaTimeline` 要求各段视频 ready、资源 ID 非空且 VideoSeconds 有效，构造 version 2 时间线，在单一 video track 上按顺序累计 StartMs，每段 clip 使用 `resource:<id>` 的 DirectMedia 引用，Volume 为 1。`submitRender` 通过 `CreateTimelineRenderTask` 进入通用渲染 worker。
+
+函数头仍有“按镜头、视频静音、配音轨”的历史注释，但当前函数正文是**按剧情段拼接并保留音量**，没有在此创建独立配音轨。文档以正文为准。时长使用段记录的 VideoSeconds；采用外部视频时会通过媒体探测校准，不能只依据镜头文字时长断言最终成片精确长度。
+
+## 8. 精修画布双向投送
+
+[`drama_canvas.go`](../../../../backend/internal/app/drama_canvas.go) 明确短剧是事实源与调度方，画布是精修台：
+
+1. 短剧到画布：前端按需投送设定、剧情段、成片；DramaCanvasAssets 创建可被画布引用的素材入口，同一资源使用稳定的 `drama-<resourceID>` ID，不复制媒体文件。
+2. 画布到短剧：仅显式采用才写回。设定图走 SetDramaCastImage；段视频走 AdoptDramaSegmentVideo，并新增 DramaTake 版本。
+3. 采用前校验项目/用户归属、资源 ready、视频 MIME、段 revision；版本冲突返回冲突原因，避免旧面板覆盖新段。
+4. 采用后清空旧尾帧并重新探测。HTTP 路径尝试补抽，Agent 检查点内只写数据库，尾帧由后续调度补做。
+5. 尾帧模式可显式要求级联重做后续段；并行模式强制不级联，因为各段不依赖前段首帧。
+
+画布生成花费纳入作品总预算。视频被送入画布或在画布生成，不等于已成为短剧当前版本；只有明确采用才完成该事实变更。
+
+## 9. 证据与验收边界
+
+[`drama_orchestrator_test.go`](../../../../backend/internal/app/drama_orchestrator_test.go) 包含小说到成片及样片关口、手动媒体放行、逐集批准、段视频失败重试、尾帧失败复用已付费结果、预算暂停等回归用例。本文阅读了实现与测试名称/相关代码，未运行模型、ffmpeg 或真实制作端到端验收。
+
+本次仅新增文档，不修改原有外貌、提示词、素材或路由变更。真实形象一致性、视频模型音频质量、段间连续性、并发预算边界和中断恢复仍需在配置好的模型及存储环境验收。

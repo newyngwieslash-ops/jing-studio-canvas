@@ -2,6 +2,15 @@
 
 面向 AI 的短索引。详细文档维护规则见 [AGENTS.md](../AGENTS.md) 第 9 节「文档与交付」。
 
+## 架构与技术原理
+
+- [架构总览](content/docs/architecture/index.mdx)：系统边界、数据与调用合同、关键实现差异和阅读路线。
+- [前端架构](content/docs/architecture/frontend.mdx)：画布、账号隔离、同步、生成交付、编辑器与插件。
+- [后端与任务](content/docs/architecture/backend.mdx)：数据库队列、租约、模型协议、SSE、资源与安全。
+- [Agent 与部署](content/docs/architecture/agent-and-deployment.mdx)：Pi 回调、审批暂停和续跑、检查点、六服务部署与更新器。
+- [短剧制作](content/docs/architecture/production.mdx)：作品、分集、剧情段、调度与精修画布。
+- [Archify 图表及验证记录](architecture/README.md)：系统架构图、生成时序图、Agent 审批时序图、JSON 规格和哈希回执。
+
 ## 部署与更新入口
 
 用户要求部署服务器时，默认使用官方 Release 镜像、`docker-compose.deploy.yml` 和 Host Updater。本地 SQLite 构建与自定义 Compose 不属于后台在线更新管理范围。

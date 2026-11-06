@@ -1,0 +1,205 @@
+---
+title: 后端、生成任务与资源一致性
+description: 从 Go 启动入口到数据库租约、模型执行、流式回放和资源交付的实现原理
+---
+
+本页依据当前工作区源码说明实际行为，不是重构提案，也不代表生产负载、安全审计或真实模型验收已完成。后端包含 HTTP 组合根、业务域和同进程后台调度器；数据库任务表是生成队列的持久真相源，Redis 主要承担跨实例协调。
+
+## 1. 启动与关闭
+
+入口是 [`cmd/server/main.go`](../../../../backend/cmd/server/main.go) 的 `main → run`：
+
+1. 初始化日志，建立由 SIGINT/SIGTERM 取消的根 context。
+2. 读取数据目录、数据库驱动和连接参数，调用 `database.Open`、`ConfigurePool`。
+3. `CANVAS_AUTO_MIGRATE=true` 时执行 `MigrateSchema`；否则 `RequireSchemaVersion` 要求数据库已经迁移到可用版本。
+4. 创建 repository 和 service，配置可选 Host Updater 客户端，再执行 `ValidateRuntime`。
+5. 初始化渠道模型、用户组、提示词、工作流模板、技能包、工具及工作台目录。此类初始化失败会中止启动；遗留存储迁移失败则记录 warning 后继续。
+6. 建立 Gin、访问日志/恢复、请求关联 ID、CORS，注册 `/api`、OAuth 回调和模型代理兜底路由。
+7. 成功监听 TCP 后启动 worker、视频播放副本回填，标记系统已启动。
+
+关闭时先 `beginDrain`，阻止新任务准入和领取；HTTP shutdown 最多等待 30 秒，然后按 `CANVAS_SHUTDOWN_TIMEOUT` 等待后台任务，默认 10 分钟。HTTP 请求结束、模型调用结束、资源写入结束不是同一个事件。
+
+代码中数据目录默认值仍为 `data`；本地开发约定要求显式使用 Git 忽略的 `.local/project-workbench-debug`。默认值不等于推荐开发目录。服务器编排以 [`docker-compose.deploy.yml`](../../../../docker-compose.deploy.yml) 为准。
+
+## 2. 分层是导入边界，不是多个网络服务
+
+| 层 | 职责 | 源码入口 |
+| --- | --- | --- |
+| `cmd/server` | 生命周期、依赖装配、HTTP server | [`main.go`](../../../../backend/cmd/server/main.go) |
+| `handler` | 身份、入参、请求限流、HTTP/SSE 响应 | [`routes.go`](../../../../backend/internal/handler/routes.go)、[`response.go`](../../../../backend/internal/handler/response.go) |
+| `service` | 稳定导入面，再导出 app 的类型/常量/包级函数 | [`doc.go`](../../../../backend/internal/service/doc.go)、[`aliases_funcs.go`](../../../../backend/internal/service/aliases_funcs.go) |
+| `app` | 组合根、跨域流程、尚未拆出的业务实现 | [`service.go`](../../../../backend/internal/app/service.go) |
+| 业务域 | auth、canvas、skills、prompts、tools、workbench、platform 等能力 | `newService` 中各领域构造调用 |
+| `repository` | GORM 查询、条件更新、事务、租约 | [`repository_tasks.go`](../../../../backend/internal/repository/repository_tasks.go) |
+| `model` | 数据结构、状态枚举 | [`models_task.go`](../../../../backend/internal/model/models_task.go)、[`models.go`](../../../../backend/internal/model/models.go) |
+| `database` | 连接、连接池、迁移 | [`database.go`](../../../../backend/internal/database/database.go) |
+
+`service.New` 是 `app.New` 的别名，不增加独立对象或 RPC。`app.Service` 持有多个领域 service、repository、协调器、worker 生命周期、模型目录缓存及 Agent runtime，目前仍是较大的组合根。
+
+典型调用为 `handler → service 别名 → app → 业务域或 repository`。不能把“每次都经过独立业务域”当作事实：任务准入、生命周期和 provider 编排仍在 app，直接使用 repository；已拆出的域通过构造时注入的 host/gate 接口访问组合根能力。
+
+### HTTP 合同与例外
+
+`ok` 返回 HTTP 200 和 `{ code: 0, data, msg: "ok" }`；`failService` 投影 `AppError` 的 HTTP status、业务 code、reason、安全消息，未知内部错误经 `failInternal` 隐去原文。
+
+当前并非所有路由都使用 `failService`。`POST /tasks` 在 `CreateTask` 返回错误后仍调用 `fail(c, 400, err)`，该分支不会完整保留 `AppError` 的 status/reason。统一响应函数具备某种能力，不意味着每个调用点已完成迁移。本页只记录差异，不修改业务代码。
+
+## 3. 生成任务准入
+
+核心为 [`task_creation.go`](../../../../backend/internal/app/task_creation.go) 的 `CreateTask`。handler 先取得当前用户、按用户限流、限制请求体，再注入 trace/request ID。服务端依次处理：
+
+- 拒绝排空期间的新生成；公共 `/tasks` 请求不能伪装为内部 Agent 任务。
+- 校验类型、规范化 JSON、检查 prompt 和工具引用。视频处理可由服务端重算参数和提示词。
+- 区分工作流执行器、受管逻辑模型、系统渠道及自定义渠道，按目录、用户组、能力和功能开关重新解析。
+- 受管模型冻结 logical model、revision、route、channel model 和 `RouteRun`，客户端不能任意覆盖供应商协议、地址及价格层。
+- 拒绝内嵌媒体 data URL；媒体先上传为资源，再以引用进入任务。
+- 检查活动上限、项目状态、文件容量和任务历史数据容量。
+- 计算计费订单，内部 Agent 准入另有报价上限/批准信息，不能由公共 JSON 设置。
+- 保护任务输入中的敏感字段，持久化任务与必要积分预留，成功后唤醒 dispatcher。
+
+[`storage_quota.go`](../../../../backend/internal/app/storage_quota.go) 的 `createTaskWithinStorageQuota` 在进程内 `storageMu` 下检查用量，再调用 repository 的 `CreateTaskWithCreditReservation` 或 `CreateTaskWithActiveLimit`。应用预检查用于快速拒绝，repository 条件/事务处理并发创建；早先的一次 count 不是并发安全保证。
+
+[`task_storage_admission.go`](../../../../backend/internal/app/task_storage_admission.go) 只确认尚有文件空间，无法提前知道生成结果最终大小，因此回存时仍检查容量。
+
+### 不走普通队列的任务
+
+1. `text_replay` 是前端管理的文本存档容器，用于增量上报和最终归并，不排队或按普通任务创建计费订单。代码注释中的“前端直连”不能据此推断浏览器绕过后端渠道中转。
+2. Pi Agent 根任务通过内部 `NonBillable` 准入成为持久控制面载体，也使用 `text_replay`；实际模型调用由后续 `cloud_agent_step` 承担。
+
+因此 Task 行数不能直接代表模型调用次数或费用。
+
+## 4. 数据库队列、租约与并发槽
+
+[`task_worker.go`](../../../../backend/internal/app/task_worker.go) 的 dispatcher 监听进程内唤醒和 2 秒扫描 ticker：唤醒减少延迟，扫描负责跨进程发现与漏通知恢复。这不是 Redis list/stream 消费循环。
+
+每次执行先读取并发策略，领取全局 `workers` 槽租约（1 分钟），再调用 `ClaimNextTask`，以独立 owner token 领取任务租约（45 秒）。执行每 15 秒续期全局槽与任务租约；完成释放槽并唤醒调度器，丢失租约则取消执行 context。
+
+`ClaimNextTask` 领取 `queued` 或租约过期的 `running` 任务，并要求 `next_poll_at` 已到期。PostgreSQL 使用 `FOR UPDATE SKIP LOCKED` 跳过竞争行；SQLite 依赖事务内条件更新。任务按 `created_at asc` 选择。
+
+### 为何写入还要校验租约
+
+旧进程可能暂停到租约过期，新执行者接管后旧进程又恢复。`taskLeaseWriter` 要求写入符合当前 `lease_owner` 且租约未过期，并结合预期任务状态做条件更新。旧 owner 不能继续更新进度、写终态或新增关联结果。
+
+[`task_lease_fencing_test.go`](../../../../backend/internal/repository/task_lease_fencing_test.go) 覆盖过期 owner 续租失败、旧 owner 写进度/终态/结果失败、新 owner 成功写入。本次阅读了测试，未运行它。
+
+该机制隔离数据库写入，不等价于第三方模型“恰好调用一次”。网络超时可能发生在上游已接收、平台尚未记录 request ID 之间，需要提交证据、原任务回查和费用核对处理。
+
+## 5. 执行、上游回查与结果提交
+
+`processClaimedTask` 重新读取策略，建立执行超时 context，登记取消函数，再检查数据库取消状态，覆盖“领取完成但取消 context 尚未登记”的竞态窗口。
+
+| 分支 | 行为 |
+| --- | --- |
+| 时间线转写 | 本地 whisper.cpp 独立执行器，先于普通模型流程分叉 |
+| 时间线渲染 | 独立渲染任务路径 |
+| 存在 `MediaRecoveryJSON` | 恢复已生成作品的回存，不重新生成 |
+| 普通任务 | 解密输入、复查渠道开关、建立 route attempt，进入 `taskRouteExecutor` |
+| 已提交异步上游 | 按 `ProviderRequestID`、`PollStage`、`NextPollAt` 回查原任务 |
+
+路由执行见 [`task_route_executor.go`](../../../../backend/internal/app/task_route_executor.go)，协议入口见 [`provider.go`](../../../../backend/internal/app/provider.go) 及文本、图片、视频、音频和声明式协议拆分文件。
+
+上游已收单但未完成时，`DeferRunningTaskForProviderPoll` 保存下次回查时间并释放执行位。任务仍是 `running`，后续领取保留 request ID 和进度。`Attempts` 随每次领取增加，不能解释为新生成次数；`RouteRun` 仅在用户主动重试时增加。
+
+成功后先回存媒体，再汇总结果与画布操作。repository 的 `SaveTaskCompletionWithRegistration` 在事务内条件更新任务、插入 Result，并在存在 registration 回调时登记相关资产。网络存储、所有后续计费和全部业务写回并不都包含在这一个事务里。
+
+上游生成成功与本地交付成功分开记录。回存失败可保存服务端加密检查点；普通重试接口拒绝这种任务并要求“重试保存”，避免再次生成。见 [`task_media_recovery.go`](../../../../backend/internal/app/task_media_recovery.go)。
+
+## 6. 状态、重试、取消与计费
+
+普通状态为 `queued → running → succeeded/failed/cancelled`，另有前述 `text_replay`。异步回查可多次停留在 running。
+
+[`task_lifecycle.go`](../../../../backend/internal/app/task_lifecycle.go) 集中处理：
+
+- 仅失败或取消的普通任务能重试，须重新校验归属、项目、渠道、计费资格、活动上限。
+- 上游取消待确认、账单待核对时阻止重复提交。
+- Agent、智能创作、媒体恢复使用各自的授权/恢复入口。
+- 用户取消在已进入上游提交/生成阶段后被拒绝；内部父任务取消/失败和 worker context 取消仍可进入协调流程。
+- 取消先条件更新数据库，再中断活跃 context。迟到结果不能把 cancelled 改成 succeeded。
+- 上游取消与费用对账在后台继续，浏览器断开不应停止该流程。
+
+[`task_terminal.go`](../../../../backend/internal/app/task_terminal.go) 协调终态、文本归并、输出登记、计费收尾。确定未发出请求的失败可退款；已成功或提交不明确的调用进入费用核对，不能一律退款。`TaskExecutionDiagnostic` 分别记录阶段、提交结果、恢复类别和写回结果，UI/Agent 不必解析错误文案推断执行事实。
+
+回归入口包括 [`task_cancellation_test.go`](../../../../backend/internal/app/task_cancellation_test.go) 的已提交任务拒绝用户取消/内部取消仍协调，以及 [`task_terminal_test.go`](../../../../backend/internal/app/task_terminal_test.go) 的终态冲突不继续退款、收尾错误向上传播。
+
+## 7. 文本 SSE 与持久回放
+
+[`task_text_stream.go`](../../../../backend/internal/app/task_text_stream.go) 按约 2 KiB 或 500 ms 批量持久化模型增量。写入失败会禁用该次发布器并记录降级，不仅因观测通道失败就把成功模型生成改成失败。
+
+TaskTextDelta 保存 task ID、递增 Sequence、内容、字节数和过期时间；最终正文进入 Task.ResultJSON，失败草稿可进入 TextDraft。回放窗口与最终正文不是同一存储形态。
+
+`GET /api/tasks/:id/text-events` 检查用户权限后建立 SSE：
+
+- `after` 与 `Last-Event-ID` 均须是非负整数，同时存在取较大者。
+- `delta` 的 SSE id 是增量序列号，不是任务 ID。
+- `progress` 携带阶段/进度，`terminal` 携带完成快照，不占用增量序列号。
+- handler 每 750 ms 从缓存回放接口读取变化，每 15 秒发送 heartbeat。
+- 浏览器断开只终止该流连接，不代表后台生成停止。
+
+实现见 [`handler/routes.go`](../../../../backend/internal/handler/routes.go)、[`text_replay.go`](../../../../backend/internal/app/text_replay.go)、[`text_replay_cache.go`](../../../../backend/internal/app/text_replay_cache.go)。这是可断线续读的有界回放，不是无限保存，也不是直接透传供应商连接。
+
+## 8. 数据库和 Redis
+
+[`database.Open`](../../../../backend/internal/database/database.go) 支持 SQLite/PostgreSQL。SQLite 默认 DSN 开启 WAL、外键、busy timeout、immediate 事务锁；PostgreSQL 要求 DATABASE_URL。默认连接池 open/idle 上限分别为 SQLite 8/4、PostgreSQL 30/10。
+
+[`platform/coordination.go`](../../../../backend/internal/platform/coordination.go) 在 PostgreSQL 模式下要求 REDIS_URL，缺失或连接失败成为运行时错误。SQLite 无 Redis 可使用进程内限流/槽记录，但不是共享多实例协调。
+
+Redis 承担固定窗口限流、租期并发槽、渠道熔断、路由健康和目录版本协调；协调写关闭透明重试以免放大故障。Task、计费订单、资源身份和恢复证据仍在数据库。完整实体说明见 [后端数据库](../backend/backend-database.mdx)。
+
+## 9. 资源身份、访问与物理交付
+
+### 写入与恢复
+
+[`resource_store.go`](../../../../backend/internal/app/resource_store.go) 的实际流程为 `校验上传身份/MIME/配额 → 创建 pending Resource → 写本地或 OSS 对象 → 保存 ready → 可选播放副本转码`。
+
+写对象失败记录 failed；对象已写入但就绪状态或容量提交失败时尝试删除对象，清理失败则保留失败记录。上传幂等键识别重复请求并校验媒体身份，OSS 失败不会静默变成本地成功。文件头“先落对象再登记”的概括与函数正文不同，本页以 `storeResourceWithWriter` 为准。
+
+### 访问与交付
+
+[`resource_access.go`](../../../../backend/internal/app/resource_access.go) 先通过 ResourceForUser 检查归属，再由 assets.ResolveAccess 决定原始/播放副本、平台代理/CDN/源站和过期时间。资源 ID 是持久身份，签名 URL 是按场景派生的临时访问凭据。
+
+PrepareResourceDelivery 返回访问描述、重定向目标或支持 Range 的流。匿名公开文件入口验证绑定 resource ID、variant 和到期时间的签名。供应商取图可使用可公开访问的短期地址，登录 Cookie 不放入 URL。
+
+### 删除 Outbox 与约定差异
+
+[`resource_delete.go`](../../../../backend/internal/app/resource_delete.go) 当前并非“一切引用都阻止删除”：
+
+- 普通非归档素材删除检查业务引用并返回占用来源。
+- purge=true 的彻底删除及部分归档清理可删除仍被画布/任务引用的素材；其他素材和短剧直接复用的资源仍保留。
+- 业务记录删除与 ResourceDeletionJob 写入同一事务，随后幂等 worker 清理物理对象，失败留待重试。
+
+这与工作约定中“有引用保留”“物理删除失败不得删除素材记录”的概括有差异，需要后续统一产品和代码合同。本文不授权改变删除语义，也不把 Outbox 提交写成物理文件已经删除。
+
+[`resource_delete_test.go`](../../../../backend/internal/app/resource_delete_test.go) 同时包含普通删除拒绝活跃画布引用、彻底删除忽略任务引用、数据库失败无 Outbox、worker 完成对象清理等用例。
+
+## 10. 权限和出站安全
+
+handler 获取身份，资源级读写继续带 user ID；TaskForUser 按 id 和 user_id 查询，资源下载重复检查归属。内部 worker 的 Task(id) 属于可信后台路径，不能替代公共 API 的对象鉴权。
+
+[`settings.go`](../../../../backend/internal/app/settings.go) 的 protectTaskSecrets 入库前递归保护已识别敏感字段，执行时解密；对外经 [`task_output.go`](../../../../backend/internal/app/task_output.go) 的 taskForOutput/publicTaskInputJSON 裁剪。这是“字段保护及对外裁剪”，不能写成“任务表从不保存任何密钥材料”。
+
+出站边界见 [`outbound.go`](../../../../backend/internal/outbound/outbound.go)：
+
+| 路径 | 规则 |
+| --- | --- |
+| 普通上游 | HTTP(S)、拒绝 URL user-info、校验 DNS；非代理拨号再次解析并拨已校验 IP；重定向再校验 |
+| 自定义渠道 | 默认 HTTPS，精确白名单才允许 HTTP/私网；额外拒绝保留 IP；禁止重定向 |
+| 管理员出口代理 | 与用户 URL 不同的信任边界，可用私网代理及代理认证，目标 URL 仍校验 |
+
+默认拒绝 loopback、私网、链路本地、未指定和 multicast 地址，精确例外是 CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS。普通出站仍读取 CANVAS_ALLOW_PRIVATE_UPSTREAMS 全局开关，自定义中转不采用该开关；工作约定禁止全局放行绕过防护，该遗留能力不是推荐配置。
+
+[`outbound_test.go`](../../../../backend/internal/outbound/outbound_test.go) 提供精确白名单、私网拒绝、非法代理失败关闭、自定义渠道及重定向回归入口。测试存在不等于当前环境已通过安全验证。
+
+## 11. 故障定位阅读顺序
+
+| 现象 | 先看事实 | 入口 |
+| --- | --- | --- |
+| 创建即失败 | 用户/项目、目录、能力、上限、容量、积分 | CreateTask、storage quota |
+| 长时间 queued | drain、并发策略、Redis 槽、数据库领取 | dispatcher、ClaimNextTask |
+| running 无进度 | 上游排队/回查、request ID、租约、next poll | processClaimedTask、provider recovery |
+| 重启后疑似重复 | RouteRun/Attempts、提交证据、旧 owner 写入 | route attempt、taskLeaseWriter |
+| 生成但不可见 | 恢复检查点、Resource ready、资产登记、画布写回 | media recovery、resource store、task output |
+| 取消/重试被拒绝 | 已提交、待核账单、专属授权入口 | taskLifecycleCoordinator |
+| 文本断流 | 存储降级、窗口、游标、代理缓冲、心跳 | text publisher、SSE handler |
+| 删除后磁盘未释放 | Outbox、共享引用、worker 结果 | resource deletion worker |
+
+本次只新增文档，没有修改或运行后端业务逻辑。测试链接是可追溯的验证入口；真实模型、PostgreSQL/Redis 多实例竞争、OSS/CDN、取消对账及进程中断恢复仍需对应环境的专项验收。

@@ -136,6 +136,9 @@ func archiveFromZip(data []byte, subdir string) (skillPackageArchive, error) {
 			return skillPackageArchive{}, kernel.BadAuthRequest("技能包包含重复文件路径")
 		}
 		if entry.UncompressedSize64 > maxSkillFileBytes {
+			if !AgentReadableSkillPath(entryPath) {
+				continue
+			}
 			return skillPackageArchive{}, kernel.BadAuthRequest("技能包中单个文件不能超过 8MB")
 		}
 		file, err := entry.Open()
@@ -151,6 +154,9 @@ func archiveFromZip(data []byte, subdir string) (skillPackageArchive, error) {
 			return skillPackageArchive{}, closeErr
 		}
 		if len(content) > maxSkillFileBytes {
+			if !AgentReadableSkillPath(entryPath) {
+				continue
+			}
 			return skillPackageArchive{}, kernel.BadAuthRequest("技能包中单个文件不能超过 8MB")
 		}
 		total += int64(len(content))
@@ -191,10 +197,14 @@ func normalizeSkillArchiveRoot(raw map[string][]byte, subdir string) (map[string
 		}
 	}
 	subdir = strings.Trim(strings.ReplaceAll(strings.TrimSpace(subdir), "\\", "/"), "/")
+	allSkillRoots := collectSkillRoots(raw)
 	if subdir != "" {
 		normalized, err := normalizeSkillPath(subdir)
 		if err != nil {
 			return nil, err
+		}
+		if len(allSkillRoots) > 1 && resolveSuiteControllerRoot(raw, allSkillRoots) == normalized {
+			return buildSuiteSkillArchive(raw, normalized)
 		}
 		prefix := normalized + "/"
 		filtered := make(map[string][]byte)
@@ -208,20 +218,14 @@ func normalizeSkillArchiveRoot(raw map[string][]byte, subdir string) (map[string
 		}
 		raw = filtered
 	}
-	skillRoots := make([]string, 0, 2)
-	for filePath := range raw {
-		if filePath == "SKILL.md" {
-			skillRoots = []string{""}
-			break
-		}
-		if path.Base(filePath) == "SKILL.md" {
-			skillRoots = append(skillRoots, path.Dir(filePath))
-		}
-	}
+	skillRoots := collectSkillRoots(raw)
 	if len(skillRoots) == 0 {
 		return nil, kernel.BadAuthRequest("技能包中缺少 SKILL.md")
 	}
 	if len(skillRoots) > 1 {
+		if controllerRoot := resolveSuiteControllerRoot(raw, skillRoots); controllerRoot != "" {
+			return buildSuiteSkillArchive(raw, controllerRoot)
+		}
 		return nil, kernel.BadAuthRequest("技能包包含多个 SKILL.md，请指定单个技能目录")
 	}
 	root := skillRoots[0]
@@ -240,6 +244,113 @@ func normalizeSkillArchiveRoot(raw map[string][]byte, subdir string) (map[string
 		return nil, kernel.BadAuthRequest("技能包文件数量不能超过 512 个")
 	}
 	return files, nil
+}
+
+func collectSkillRoots(raw map[string][]byte) []string {
+	skillRoots := make([]string, 0, 2)
+	for _, filePath := range sortedSkillPaths(raw) {
+		if filePath == "SKILL.md" {
+			return []string{""}
+		}
+		if path.Base(filePath) == "SKILL.md" {
+			skillRoots = append(skillRoots, path.Dir(filePath))
+		}
+	}
+	return skillRoots
+}
+
+// resolveSuiteControllerRoot 识别「1 总控 + N 子技能」套装仓库的唯一总控目录：
+// 总控 SKILL.md 显式引用全部子技能目录，且所有子技能 SKILL.md 均指向该总控。
+func resolveSuiteControllerRoot(raw map[string][]byte, skillRoots []string) string {
+	if len(skillRoots) < 2 {
+		return ""
+	}
+	controller := ""
+	for _, candidate := range skillRoots {
+		if candidate == "" {
+			continue
+		}
+		entry := string(raw[candidate+"/SKILL.md"])
+		if entry == "" {
+			continue
+		}
+		candidateBase := path.Base(candidate)
+		matchesAll := true
+		for _, other := range skillRoots {
+			if other == candidate || other == "" {
+				continue
+			}
+			otherBase := path.Base(other)
+			otherEntry := string(raw[other+"/SKILL.md"])
+			if !strings.Contains(entry, otherBase) || !strings.Contains(otherEntry, candidateBase) {
+				matchesAll = false
+				break
+			}
+		}
+		if !matchesAll {
+			continue
+		}
+		if controller != "" {
+			return ""
+		}
+		controller = candidate
+	}
+	return controller
+}
+
+func buildSuiteSkillArchive(raw map[string][]byte, controllerRoot string) (map[string][]byte, error) {
+	prefix := controllerRoot + "/"
+	files := make(map[string][]byte, len(raw))
+	for filePath, content := range raw {
+		if strings.HasPrefix(filePath, prefix) {
+			continue
+		}
+		files[filePath] = content
+	}
+	for filePath, content := range raw {
+		if !strings.HasPrefix(filePath, prefix) {
+			continue
+		}
+		files[strings.TrimPrefix(filePath, prefix)] = content
+	}
+	if len(files) > maxSkillPackageFiles {
+		return nil, kernel.BadAuthRequest("技能包文件数量不能超过 512 个")
+	}
+	return files, nil
+}
+
+func extractGitHubZipCommit(data []byte) string {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return ""
+	}
+	comment := strings.TrimSpace(reader.Comment)
+	if isGitCommitSHA(comment) {
+		return strings.ToLower(comment)
+	}
+	if len(reader.File) > 0 {
+		first := strings.SplitN(reader.File[0].Name, "/", 2)[0]
+		if idx := strings.LastIndexByte(first, '-'); idx > 0 {
+			candidate := first[idx+1:]
+			if isGitCommitSHA(candidate) {
+				return strings.ToLower(candidate)
+			}
+		}
+	}
+	return ""
+}
+
+func isGitCommitSHA(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') && (ch < 'A' || ch > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func contentHashAndSize(files map[string][]byte) (string, int64) {
@@ -323,6 +434,8 @@ func parseSkillPackageMetadata(data []byte) skillPackageMetadata {
 				metadata.Name = value
 			case indent == 0 && key == "description":
 				metadata.Description = value
+			case indent == 0 && key == "version" && metadata.Version == "":
+				metadata.Version = value
 			case indent == 0 && key == "metadata":
 				metadataIndent = indent
 			case metadataIndent >= 0 && indent > metadataIndent && key == "version":

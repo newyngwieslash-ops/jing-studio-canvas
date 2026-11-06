@@ -1,0 +1,6 @@
+{
+  "title": "架构与技术原理",
+  "root": true,
+  "defaultOpen": true,
+  "pages": ["index", "frontend", "backend", "agent-and-deployment", "production"]
+}

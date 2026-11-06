@@ -236,6 +236,18 @@ func registerDramaRoutes(r *gin.RouterGroup, svc *service.Service) {
 		casts, err := svc.DramaCasts(userID, c.Param("id"))
 		return gin.H{"cast": casts}, err
 	}))
+	r.POST("/dramas/:id/cast/appearance-rewrite", dramaRoute(svc, 4<<10, func(c *gin.Context, userID string) (any, error) {
+		var req struct {
+			CastID string `json:"castId"`
+		}
+		if err := bindDramaJSON(c, &req); err != nil {
+			return nil, err
+		}
+		return svc.StartDramaAppearanceRewrite(userID, c.Param("id"), req.CastID)
+	}))
+	r.GET("/dramas/:id/cast/appearance-rewrite/:taskId", dramaRoute(svc, 0, func(c *gin.Context, userID string) (any, error) {
+		return svc.DramaAppearanceProposals(userID, c.Param("id"), c.Param("taskId"))
+	}))
 	r.PATCH("/dramas/:id/cast/:castId", dramaRoute(svc, 64<<10, func(c *gin.Context, userID string) (any, error) {
 		var req service.UpdateDramaCastRequest
 		if err := bindDramaJSON(c, &req); err != nil {

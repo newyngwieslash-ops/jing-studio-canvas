@@ -604,6 +604,19 @@ export function regenerateDramaCast(projectId: string, castId: string, restyleSe
     return http.post<{ affectedSegments: number }>(`${base(projectId)}/cast/${encodeURIComponent(castId)}/regenerate`, { restyleSegments });
 }
 
+export type DramaAppearanceProposal = { castId: string; name: string; before: string; after: string };
+
+export type DramaAppearanceProposals = { status: "running" | "succeeded" | "failed"; error?: string; proposals: DramaAppearanceProposal[] };
+
+/** 用资产提取技能（没有就用内置规则）为未锁定的角色生成新外貌建议；传 castId 只重写这一个角色。只创建任务，不改设定。 */
+export function startDramaAppearanceRewrite(projectId: string, castId?: string) {
+    return http.post<{ taskId: string; skillName: string }>(`${base(projectId)}/cast/appearance-rewrite`, { castId: castId || "" });
+}
+
+export function getDramaAppearanceProposals(projectId: string, taskId: string, signal?: AbortSignal) {
+    return http.get<DramaAppearanceProposals>(`${base(projectId)}/cast/appearance-rewrite/${encodeURIComponent(taskId)}`, { signal });
+}
+
 /** 重新处理已生成但后处理失败的段视频：重放原任务结果，不重新生成、不扣费。 */
 export function reprocessDramaSegmentVideo(projectId: string, episodeId: string, segmentIndex: number) {
     return http.post<{ reprocessing: boolean }>(`${base(projectId)}/episodes/${encodeURIComponent(episodeId)}/segments/${segmentIndex}/reprocess`);

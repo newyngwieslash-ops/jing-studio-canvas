@@ -1,0 +1,179 @@
+---
+title: 前端架构与交互原理
+description: 应用启动、画布同步、生成结果交付与编辑器插件边界
+---
+
+# 前端架构与交互原理
+
+本文描述当前工作树中的实现，设计文档中的后续计划不作为已实现能力。源码链接相对于仓库定位，适合在仓库 Markdown 阅读器中打开。依赖版本以 [web/package.json](../../../../web/package.json) 与锁文件为准。
+
+## 1. 职责与分层
+
+影策前端是 React 单页应用，负责导航、画布交互、任务状态呈现、账号范围的本地数据，以及将创作意图转换成后端请求。任务调度、最终权限判断、计费和服务端资源持久化由后端处理。
+
+| 层次 | 入口 | 责任 |
+| --- | --- | --- |
+| 启动与路由 | `application.tsx`、`router.tsx` | 挂载、Provider、懒加载、错误边界 |
+| 页面编排 | `pages/canvas/`、`pages/projects/`、`pages/create/` | 用户操作、查询、局部状态、流程 |
+| 交互组件 | `components/canvas/`、`components/editor/` | 节点、视口、连接、编辑器上下文 |
+| 状态 | `stores/canvas/`、`stores/editor/`、`stores/use-*.ts` | 共享状态、配置、持久化、历史 |
+| 副作用 | `services/` | 同步、文件、生成物化、缓存、插件宿主 |
+| 协议 | `services/api/` | 业务 JSON、任务、资源授权、渠道传输 |
+| 算法 | `lib/canvas/`、`lib/timeline/`、`lib/plugins/` | 几何、版本合并、命令、清单和权限 |
+
+React Query 缓存服务端查询，Zustand 管理工作区和编辑状态，localforage 保存画布与素材等较大快照。三者职责不同。
+
+## 2. 启动、认证与路由
+
+[application.tsx](../../../../web/src/application.tsx) 建立 `React.StrictMode → AppProviders → RouterProvider`。在 [app-providers.tsx](../../../../web/src/components/layout/app-providers.tsx) 中，主题和外观配置先影响根元素、皮肤变量和元信息；Ant Design 接收统一主题及中文 locale。`AppFeedbackProvider` 提供反馈环境，`QueryClientProvider` 使用共享 QueryClient。
+
+[AuthSessionHydrator](../../../../web/src/components/auth/auth-session-hydrator.tsx) 请求会话，再由 `applyUserSession` 恢复账号数据。恢复完成前展示加载界面；失败时应用匿名会话。已登录工作区随后加载 `ClientRootInit`，初始化诊断并获取服务端插件有效状态。模型目录部分刷新在后台进行，失败时保留本地配置。
+
+[QueryClient](../../../../web/src/lib/query-client.ts) 默认 stale time 为 30 秒，关闭默认重试和窗口聚焦自动刷新。业务模块需要重试时必须拥有明确策略，不能假设所有查询自行重试。
+
+[router.tsx](../../../../web/src/router.tsx) 使用 `createBrowserRouter`：认证页面共用 `AuthScene`，分享画布使用 `/share/canvas/:token`，工作区由 `AuthenticatedWorkspaceLayout` 和 `UserLayout` 包装。画布、作品、素材、任务、技能、插件、设置和后台页面按需加载。
+
+`RequireAuth` 与 `RequireFeature` 分别处理前端会话和功能开关；它们属于体验边界，后端仍须逐请求鉴权。匿名工作区路径通过 `isGuestWorkspacePath` 判断，不代表整个工作区公开。开发复现路由只在 `import.meta.env.DEV` 内创建，动态 import 放在 `devRoutes()` 中以允许生产构建移除；特定预演复现页还隔离认证和模型请求。
+
+## 3. 画布状态、交互与渲染
+
+### 3.1 持久状态与实时状态
+
+[CanvasProject](../../../../web/src/stores/canvas/use-canvas-store.ts) 包含节点、连接、会话、外观、视口、预演场景及可选时间线，另有 `revision` 和 `remoteContentHash` 等同步字段。
+
+[project.tsx](../../../../web/src/pages/canvas/project.tsx) 是页面组合点，通过 React state/ref 保存当前节点、连接、选区和视口，组合生命周期、生成、拖拽、上传、批次和短剧等 hook。Store 并非每帧指针数据的唯一直接渲染源。异步回调读取 ref 中的最新状态，避免旧闭包覆盖用户后续编辑。
+
+| 功能 | 入口 | 原理 |
+| --- | --- | --- |
+| 生命周期 | [use-canvas-project-lifecycle.ts](../../../../web/src/pages/canvas/use-canvas-project-lifecycle.ts) | 连接持久项目、页面状态、同步和会话维护 |
+| 视口 | [canvas-viewport.tsx](../../../../web/src/components/canvas/canvas-viewport.tsx) | 平移、缩放、触摸、捕获和滚轮意图 |
+| 选择 | [use-canvas-selection-controller.ts](../../../../web/src/pages/canvas/use-canvas-selection-controller.ts) | 选区、拖拽预览、最终坐标 |
+| 连接 | [use-canvas-connection-controller.ts](../../../../web/src/pages/canvas/use-canvas-connection-controller.ts) | 连接起止点与创建交互 |
+| 渲染 | [use-canvas-render-model.ts](../../../../web/src/pages/canvas/use-canvas-render-model.ts) | 索引、引用稳定性、可见性、渲染预算 |
+| 历史 | [use-canvas-history.ts](../../../../web/src/pages/canvas/use-canvas-history.ts) | 当前页面撤销、重做和历史协调 |
+
+### 3.2 大画布原理
+
+`useCanvasRenderModel` 创建节点 ID 和连接索引、复用语义未变的引用，再通过空间索引筛选可见节点，用渲染预算与 LOD（细节级别）控制呈现。画布中存在的节点与当前完整渲染的节点不是同一集合。
+
+算法位于 [canvas-spatial-index.ts](../../../../web/src/lib/canvas/canvas-spatial-index.ts)、[canvas-node-visibility.ts](../../../../web/src/lib/canvas/canvas-node-visibility.ts)、[canvas-node-lod.ts](../../../../web/src/lib/canvas/canvas-node-lod.ts)、[canvas-render-budget.ts](../../../../web/src/lib/canvas/canvas-render-budget.ts)。这些代码说明优化方向，本文没有测量大规模节点帧率或容量。
+
+`CanvasViewport` 使用 `setPointerCapture` 并维护 pointer up/cancel 收尾；wheel 监听为非 passive、capture。忽略选择器覆盖 `data-canvas-no-zoom`、`data-canvas-wheel-scroll` 以及 modal/popover/dropdown/select/picker 浮层。新增面板必须保留这些边界，否则面板滚动可能触发画布缩放。两指缩放有独立意图判断，不能简单以全局禁止滚轮取代。
+
+## 4. 本地缓存、账号隔离与云端同步
+
+### 4.1 三种保存状态
+
+[localforage-storage.ts](../../../../web/src/lib/localforage-storage.ts) 配置 `yingce/app_state`，通过 [user-scope.ts](../../../../web/src/lib/user-scope.ts) 将键扩展为 `name:user:scope`。localforage 使用浏览器可用驱动，不保证任何环境都使用 IndexedDB。小型配置的 `scopedLocalStorage` 同样隔离账号。
+
+页面实时状态、本地快照、服务端已确认版本是三个不同层次。`useSyncProgressStore` 区分本地和远端阶段；[CanvasSyncStatus](../../../../web/src/pages/canvas/canvas-sync-status.tsx) 只有远端为 `done` 且无待处理或错误条件时显示“已同步”。本地落盘成功不是服务端保存证明。
+
+### 4.2 账号切换顺序
+
+[user-session.ts](../../../../web/src/lib/user-session.ts) 的 `applyUserSession` 与 `switchUserStorageScope`：
+
+1. 身份变化时清理共享 QueryClient，防止旧查询缓存复用。
+2. 暂停新生成结果消费，取消并等待活动消费者结束。
+3. 在远端同步独占区内 flush 旧画布及素材，重置同步状态、清资源访问和 Blob 缓存，然后切换 scope。
+4. 在禁止持久化的边界内重置账号内存，再设置新会话。
+5. rehydrate 各 Store；目标 scope 无快照时显式恢复空状态。
+6. 初始化远端同步基线，以 session generation 校验拒绝过期异步结果。
+
+暂停排空见 [generation-consumer-lifecycle.ts](../../../../web/src/services/generation-consumer-lifecycle.ts)。隔离不仅依赖键名，也依赖切换瞬间的异步操作收尾。
+
+### 4.3 版本与合并
+
+[user-data-sync.ts](../../../../web/src/services/user-data-sync.ts) 维护已确认基线、待提交 mutation journal、远端加载任务及串行操作链。`loadCanvasProjectForEditing` 比较远端版本、本地内容哈希与确认基线，保留未确认编辑并 rebase，不会收到快照就整体覆盖。
+
+`applyAgentCanvasPatches` 按 revision 排序并忽略旧版本；新 patch 要求安全整数版本、正确的 `baseRevision` 及 `revision = baseRevision + 1`。缺版本或断档时要求重读画布。必要时保存本地冲突副本，以保留未确认修改。
+
+[canvas-storage-revision.ts](../../../../web/src/lib/canvas/canvas-storage-revision.ts) 和画布 Store 还有浏览器本地 storage revision 与锁，不能与服务端 revision 混用。[canvas-realtime.ts](../../../../web/src/services/canvas-realtime.ts)、[canvas-realtime-client.ts](../../../../web/src/services/canvas-realtime-client.ts) 管理实时连接；Presence、光标、拖拽投影不能代替持久 operations 的版本确认。
+
+## 5. API、错误与模型渠道
+
+### 5.1 业务 JSON
+
+[request.ts](../../../../web/src/services/api/request.ts) 的 `http.get/post/put/patch/delete` 经共享 Axios 调用后端，base URL 为 `VITE_CANVAS_BACKEND_URL || "/api"`，启用 Cookie 凭据。
+
+`request()` 解包 `{ code, data, msg, reason, details }`。即使 HTTP 为 200，`code !== 0` 也抛出 `ApiError`；调用方直接拿到 `data`。错误保留 HTTP status、业务 code、reason、details、retryable、Retry-After 等语义；取消转换或保留为 `AbortError`，不误报普通失败。
+
+该边界判断可重试性，但不会自动重放所有写请求；重试属于拥有幂等语义的上层。二进制或非信封响应使用 `http.raw`，媒体和 SSE 使用各自传输边界。
+
+### 5.2 渠道与模型协议
+
+[custom-channel-relay.ts](../../../../web/src/services/api/custom-channel-relay.ts) 的 `channelRequest` 对系统代理保留站内地址；对自定义渠道校验 HTTP(S) URL，清除旧 `X-Canvas-Upstream-Headers` 与 `x-goog-api-key`，重建 Authorization 和上游元信息，请求登录态 `/api/ai/custom`。
+
+[channel-transport.ts](../../../../web/src/services/api/channel-transport.ts) 统一 JSON、FormData、Blob 传输，供应商 payload 与响应解析留在图片、视频和音频模块。模型响应不是业务信封，不能套用 `http` 的解包；FormData 不手工设置 Content-Type。该模块还保留 `getExternalBlob`，因此不能声称所有媒体获取都经过 `/api/ai/custom`。
+
+主生成链路已进入后端任务 API；保留渠道协议模块不意味着页面应绕过任务生命周期。`ClientRootInit` 会移除并忽略 URL 中的 apiKey 参数，不从链接导入密钥。
+
+## 6. 从生成意图到结果落盘
+
+### 6.1 提交与监听
+
+[useCanvasGenerationExecutor](../../../../web/src/pages/canvas/use-canvas-generation-executor.ts) 整理节点、媒体引用、模型能力、技能和风格信息，准备阶段及引用补全后检查兼容性，再交给对应模式执行器。
+
+[generation-task.ts](../../../../web/src/services/api/generation-task.ts) 提供两种入口：`runBackendGenerationTask` 准备引用、创建任务并等待结果；`submitBackendGenerationTask` 可靠提交后返回，由工作区轮询和后端回填继续处理。
+
+二者通过 [task-center.ts](../../../../web/src/services/api/task-center.ts) 调用后端任务接口，保留 `clientOperationId`、`retryOf`、`attemptGroupId` 等关联信息。引用准备把本地媒体转换为后端可使用的资源；本地 Blob URL 不是服务端可访问地址。
+
+普通 `waitForGenerationTask` 默认每 2 秒查询，连续查询失败五次会报错；`failed/cancelled` 转成终态错误。等待的 AbortSignal **只结束页面监听，不自动取消已经提交的上游任务**。业务取消通过 `cancelGenerationTask` 独立提交。
+
+### 6.2 文本 SSE
+
+启用文本事件或存在 `onTextDelta` 时，等待逻辑改用带 Cookie 的 fetch 读取 `/tasks/:id/text-events`，校验 HTTP 状态、Content-Type 和响应体。
+
+[task-text-stream.ts](../../../../web/src/services/api/task-text-stream.ts) 按空行解析 SSE block；网络 chunk 不等于完整事件。delta 用 `sequence` 或数字事件 id 去重，重连携带 `?after=lastEventId`。terminal 到达后重新查询任务确认最终状态；流关闭本身不代表成功。等待器也有 Agent 事件来源选项，但文本流不是 Agent 工具和审批的执行器。
+
+### 6.3 执行成功与结果交付
+
+任务执行状态是 `queued/running/succeeded/failed/cancelled`；结果还有 `PENDING_MATERIALIZATION/MATERIALIZING/READY/FAILED_*` 等独立状态。供应商成功并不代表素材登记和节点绑定已持久化。
+
+[generation-task-materializer.ts](../../../../web/src/services/generation-task-materializer.ts) 用 effect key 区分物化、节点附着、消息附着和 Agent 恢复，如 `materialize:taskId:outputIndex`、`attach-node:taskId:nodeId:outputIndex`。effect store 提供 claim/renew/complete/release；消费者领取带 fence/binding 的租约并续租，已完成副作用不重复执行。
+
+[canvas-generation-consumer.ts](../../../../web/src/services/canvas-generation-consumer.ts) 登记素材、flush 素材持久化，再提交画布结果。`CanvasGenerationDurableAckError` 表达交付落盘失败，完成标记不能提前于持久化。live adapter 将持久结果与最新编辑状态合并，避免覆盖生成期间的用户修改。这些是可恢复交付机制，不应宣称任意故障下全系统 exactly-once。
+
+## 7. 时间线与插件边界
+
+### 7.1 命令状态机
+
+[editor-store.ts](../../../../web/src/stores/editor/editor-store.ts) 的 `createEditorStore` 通过 command registry 修改 `TimelineProject`，失败时保持原项目并记录错误。撤销/重做使用有界快照历史；拖拽的 `previewGesture → commitGesture/cancelGesture` 使一次连续手势只产生一个历史项。预览期间拒绝 dispatch/undo/redo。
+
+保存回调由宿主注入，默认防抖 1.5 秒并串行保存；Store 本身不证明服务端持久化成功。命令和历史见 [editor-commands.ts](../../../../web/src/lib/timeline/editor-commands.ts)、[editor-history.ts](../../../../web/src/lib/timeline/editor-history.ts)。[EditorStoreProvider](../../../../web/src/components/editor/editor-context.tsx) 把项目 Store 和素材能力注入面板。
+
+### 7.2 当前插件组成
+
+[editor-shell.tsx](../../../../web/src/lib/plugins/builtin/editor/editor-shell.tsx) 是一个 `yingce.plugin/v2` 插件，注册时间线、预览、检查器、素材、字幕、转写、导出、AI 助手八个插槽。**当前不是八个彼此独立安装的编辑器插件。**
+
+[editor-slot-registry.ts](../../../../web/src/lib/plugins/editor-slot-registry.ts) 按优先级和注册顺序提供贡献，支持幂等替换与卸载；[plugin-registry.ts](../../../../web/src/lib/plugins/plugin-registry.ts) 校验清单和贡献类型；[plugin-permission-check.ts](../../../../web/src/lib/plugins/plugin-permission-check.ts) 对未知插件和缺失权限默认拒绝，按场景要求 `timeline.read`、`timeline.command`、`export.run`。
+
+[plugin-host.ts](../../../../web/src/services/plugin-host.ts) 提供命名空间存储、配置和受权限约束的模型调用，例如调用文本模型前检查 `ai.text`。这是宿主 API 权限边界，不代表任意第三方 JavaScript 已拥有操作系统级隔离沙箱。
+
+### 7.3 两条导出路径共存
+
+[EditorExport](../../../../web/src/lib/plugins/builtin/editor/editor-export.tsx) 默认经 [timeline-tasks.ts](../../../../web/src/services/api/timeline-tasks.ts) 提交后端渲染任务，另有显式本地 ffmpeg.wasm 导出按钮。
+
+[CanvasTimelineDialog](../../../../web/src/components/canvas/canvas-timeline-dialog.tsx) 仍直接调用 [exportTimelineToMp4](../../../../web/src/lib/timeline/timeline-export.ts) 在浏览器合成。“时间线导出已全部迁移后端”不是当前事实；排查时先确认用户入口，再定位后端 ffmpeg、浏览器 wasm、媒体读取和字幕能力。
+
+## 8. 排障与回归依据
+
+| 现象 | 优先检查 | 不应误判为 |
+| --- | --- | --- |
+| 工作区启动慢 | 会话、scope flush/rehydrate、远端基线、懒加载 | 只有页面渲染问题 |
+| 刷新后修改未确认 | 本地落盘、journal、远端 revision、同步错误 | state 更新等于云端保存 |
+| 账号切换残留数据 | QueryClient、scope 顺序、generation 校验 | 只改缓存键即可 |
+| 任务成功却无节点 | READY、物化、effect、durable ack | 必须重新请求模型 |
+| 离开页面任务仍运行 | 监听 Abort 与业务取消 API | Abort 必然取消上游 |
+| 文本重复或断流 | sequence/id、after、Content-Type、终态补查 | task ID 就是游标 |
+| 面板滚动带动画布 | 忽略选择器、data 属性、wheel intent | 全局禁止滚轮即可 |
+| 导出行为不一致 | 后端任务入口与旧 wasm 入口 | 所有入口同一运行时 |
+
+已有测试可作为后续修改的回归入口：
+
+- [api-request.test.ts](../../../../web/test/api-request.test.ts)：业务信封与错误。
+- [canvas-storage-revision.test.ts](../../../../web/test/canvas-storage-revision.test.ts)、[canvas-sync-rebase.test.ts](../../../../web/test/canvas-sync-rebase.test.ts)：版本和合并。
+- [generation-storage-consistency.test.ts](../../../../web/test/generation-storage-consistency.test.ts)、[generation-task-durability.node.test.ts](../../../../web/test/generation-task-durability.node.test.ts)：交付持久化。
+- [canvas-grid-viewport.test.tsx](../../../../web/test/canvas-grid-viewport.test.tsx)：视口回归。
+- [editor-commands.test.ts](../../../../web/test/editor-commands.test.ts)、[editor-store.test.ts](../../../../web/test/editor-store.test.ts)、[plugin-permission-check.test.ts](../../../../web/test/plugin-permission-check.test.ts)：命令、状态机和权限。
+
+本文依据源码静态核对形成，以上是已有测试位置，不代表本次执行通过。真实浏览器中的账号切换、多窗口编辑、SSE 重连与媒体生成仍须通过运行验收。

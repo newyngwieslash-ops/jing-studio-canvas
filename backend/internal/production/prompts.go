@@ -87,6 +87,13 @@ func structuredSkillBlock(step string, skill *WritingSkill) string {
 	return fmt.Sprintf("【写作技能：%s】\n下面是%s必须遵循的方法与标准（来自技能文件 %s）。按技能决定取舍、粒度与写法；输出仍然只能是下面要求的 JSON，字段名与结构不变，技能与 JSON 结构冲突时以 JSON 结构为准，技能里要求的其他输出格式不要输出。\n<skill>\n%s\n</skill>\n\n", skill.Name, step, skill.Path, truncateRunes(strings.TrimSpace(skill.Content), MaxWritingSkillRunes))
 }
 
+// FaceSpecRule 是角色 appearance 的统一写法，资产提取、分镜新增角色和重写外貌共用。
+// 图片模型只能按文字画脸：只写“清隽凌厉”这类空词，同一画风下所有人会画成同一张脸。
+const FaceSpecRule = "单人角色的 appearance 先写面部识别特征：脸型与下颌、眉形与浓淡、眼型与眼距、鼻型、唇形，以及胡须、皱纹、疤痕、痣等记号；" +
+	"再写发型、体型、服装，共 80-140 字；原文写了的面部特征必须保留。" +
+	"同性别且年龄相近的角色，脸型和眉眼鼻唇之间至少 3 处明显不同，不要只靠服装区分。" +
+	"群体角色（“几名…”“列于…的护卫”）的参考图只画一名代表成员：保留群体说明，再按上面的写法给这名代表写面部特征，且与其他角色明显不同。"
+
 // BiblePrompt 基于抽样后的全书文本建立角色、场景与整体风格；skill 不为空时按技能的方法提取。
 func BiblePrompt(title string, settings Settings, chapters []Chapter, maxChars int, skill *WritingSkill) string {
 	settings = settings.Normalized()
@@ -94,12 +101,12 @@ func BiblePrompt(title string, settings Settings, chapters []Chapter, maxChars i
 	fmt.Fprintf(&b, "作品：%s\n画幅：%s\n视觉风格：%s\n对白语言：%s\n章节总数：%d\n\n", title, settings.AspectRatio, firstNonEmpty(settings.StylePrompt, "写实电影感"), settings.Language, len(chapters))
 	b.WriteString(structuredSkillBlock("提取角色、道具与场景", skill))
 	b.WriteString("请输出：\n")
-	b.WriteString(`{"logline":"一句话卖点","tone":"整体基调","visualRules":"统一的画面规则（色调/光线/服化道年代，不要写画幅比例或横竖屏）",` +
-		`"characters":[{"name":"标准名","aliases":["别名/称呼"],"role":"主角/反派/配角","gender":"男/女","age":"年龄段",` +
-		`"description":"性格与身份","appearance":"可直接用于生图的外貌、发型、服装描述（中文，40-80字）","voice":"音色、语速与说话方式"}],` +
+	b.WriteString(`{"logline":"一句话卖点","tone":"整体基调","visualRules":"统一的画面规则（色调/光线/服化道年代，不要写画幅比例或横竖屏；不要复述视觉风格，不要写适用于所有人物的统一脸型或造型）",` +
+		`"characters":[{"name":"标准名","aliases":["别名/称呼"],"role":"主角/反派/配角","gender":"男/女","age":"具体年龄，如约24岁",` +
+		`"description":"性格与身份","appearance":"可直接用于生图的外貌描述（中文，按下面的面部写法要求）","voice":"音色、语速与说话方式"}],` +
 		`"props":[{"name":"道具名","description":"用途与归属","appearance":"可直接用于生图的外形、材质、颜色描述"}],` +
 		`"scenes":[{"name":"场景名","description":"用途","appearance":"可直接用于生图的环境描述"}]}` + "\n")
-	b.WriteString("要求：角色按重要性排序，最多 24 个，只保留会在镜头中出现的人物；同一人物的不同称呼必须合并到 aliases；道具最多 20 个，只保留反复出现或推动剧情的关键物件；场景最多 16 个，只保留反复出现的地点。\n\n")
+	b.WriteString("要求：角色按重要性排序，最多 24 个，只保留会在镜头中出现的人物；同一人物的不同称呼必须合并到 aliases；道具最多 20 个，只保留反复出现或推动剧情的关键物件；场景最多 16 个，只保留反复出现的地点。\n角色面部写法：" + FaceSpecRule + "\n\n")
 	b.WriteString("【小说原文抽样】\n")
 	b.WriteString(SampleNovel(chapters, maxChars))
 	return b.String()
@@ -256,7 +263,7 @@ func ScriptPrompt(ctx ScriptContext) string {
 	} else {
 		b.WriteString("结构：保持原文的剧情顺序，不为钩子或悬念改动内容。\n")
 	}
-	b.WriteString("imagePrompt 中用角色名、道具名指代，不要重复外貌描述；cast 只列表里没有的新设定，没有则给空数组。\n")
+	b.WriteString("imagePrompt 中用角色名、道具名指代，不要重复外貌描述；cast 只列表里没有的新设定，没有则给空数组；新角色的 appearance 按面部写法：" + FaceSpecRule + "\n")
 	if strings.TrimSpace(ctx.Synopsis) == "" {
 		b.WriteString(`本集还没有梗概：在 JSON 顶层另给 "episode":{"synopsis":"本集剧情梗概（80-150字）","hook":"开场钩子","cliffhanger":"结尾悬念"}，按原文概括。` + "\n")
 	}

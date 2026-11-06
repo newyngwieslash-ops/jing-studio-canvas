@@ -1,0 +1,26 @@
+{
+  "schema_version": 1, "diagram_type": "architecture",
+  "meta": { "title": "影策 · 系统架构", "locale": "zh-CN", "quality_profile": "showcase", "repository": { "url": "https://github.com/newyngwieslash-ops/jing-studio-canvas.git", "revision": "21adab22d65c6cf572f9fd6a910b459c82051c53", "link_mode": "local-only" } },
+  "components": [
+    { "id": "workbench", "type": "frontend", "label": "创作工作台", "sublabel": "React · 画布与项目", "pos": [40, 300], "size": [180, 80], "sources": [{ "path": "web/src/application.tsx" }] },
+    { "id": "web-gateway", "type": "cloud", "label": "Web 入口", "sublabel": "Nginx · 静态资源", "pos": [330, 300], "size": [180, 80], "sources": [{ "path": "nginx.conf" }] },
+    { "id": "business-api", "type": "backend", "label": "业务与任务服务", "sublabel": "Go · Gin · Worker", "pos": [620, 300], "size": [200, 80], "sources": [{ "path": "backend/cmd/server/main.go" }] },
+    { "id": "model-upstream", "type": "external", "label": "模型上游", "sublabel": "文本 · 图片 · 音视频", "pos": [1000, 300], "size": [190, 80], "sources": [{ "path": "backend/internal/app/provider.go" }] },
+    { "id": "browser-cache", "type": "database", "label": "浏览器缓存", "sublabel": "localforage · 用户隔离", "pos": [40, 60], "size": [180, 80], "sources": [{ "path": "web/package.json" }] },
+    { "id": "business-db", "type": "database", "label": "业务数据库", "sublabel": "PostgreSQL / SQLite", "pos": [620, 60], "size": [200, 80], "sources": [{ "path": "backend/cmd/server/main.go" }] },
+    { "id": "pi-runtime", "type": "backend", "label": "Agent 运行时", "sublabel": "Node pi · 回调 Go", "pos": [620, 560], "size": [200, 80], "sources": [{ "path": "docker-compose.deploy.yml" }] }
+  ],
+  "connections": [
+    { "id": "browser-http", "from": "workbench", "to": "web-gateway", "label": "HTTP", "variant": "emphasis" },
+    { "id": "api-proxy", "from": "web-gateway", "to": "business-api", "label": "/api", "variant": "emphasis" },
+    { "id": "provider-call", "from": "business-api", "to": "model-upstream", "label": "协议适配 / HTTP", "variant": "emphasis" },
+    { "id": "cache-write", "from": "workbench", "to": "browser-cache", "label": "本地缓存", "fromSide": "top", "toSide": "bottom" },
+    { "id": "sql-write", "from": "business-api", "to": "business-db", "label": "GORM / SQL", "fromSide": "top", "toSide": "bottom" },
+    { "id": "runtime-invoke", "from": "business-api", "to": "pi-runtime", "label": "嵌入进程 / 远程 HTTP", "fromSide": "bottom", "toSide": "top", "labelAt": [720, 394] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "交互与持久化", "items": ["本地缓存与服务端保存分开判断", "生产经 Nginx；开发可经 Vite 代理"] },
+    { "dot": "emerald", "title": "异步任务", "items": ["任务记录与租约在 SQL 数据库", "Redis 协调限流、并发与熔断"] },
+    { "dot": "violet", "title": "运行边界", "items": ["Agent 的模型和工具回调 Go", "资源对象独立存储，详见正文"] }
+  ]
+}

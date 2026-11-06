@@ -150,13 +150,38 @@ type PendingResourceAccess = {
     reject: (reason?: unknown) => void;
 };
 const accessCache = new Map<string, CachedResourceAccess>();
-const accessRequests = new Map<string, Promise<ResourceAccess>>();
+type ResourceAccessRequest = { promise: Promise<ResourceAccess>; forceRefresh: boolean };
+const accessRequests = new Map<string, ResourceAccessRequest>();
 const pendingResourceAccess = new Map<string, PendingResourceAccess>();
 let resourceAccessBatchTimer: ReturnType<typeof setTimeout> | undefined;
 const PERSISTED_DISPLAY_ACCESS_PREFIX = "resource-access-v1:";
 
 function persistedDisplayAccessKey(resourceId: string, variant: ResourceAccessVariant) {
     return `${PERSISTED_DISPLAY_ACCESS_PREFIX}${resourceId}:${variant}`;
+}
+
+// 已开始的存储事务无法取消；跨会话保留同键顺序，避免旧删除/写入覆盖新值。
+const persistedAccessOperations = new Map<string, Promise<unknown>>();
+
+function withPersistedDisplayAccess<T>(
+    scope: string,
+    resourceId: string,
+    variant: ResourceAccessVariant,
+    generation: number,
+    operation: (storage: ReturnType<typeof localForageStorageForScope>, key: string) => Promise<T>,
+): Promise<T> {
+    const storageKey = persistedDisplayAccessKey(resourceId, variant);
+    const queueKey = JSON.stringify([scope, storageKey]);
+    const previous = persistedAccessOperations.get(queueKey);
+    const request = Promise.resolve(previous).catch(() => {}).then(() => {
+        assertResourceRequestCurrent(generation, scope);
+        return operation(localForageStorageForScope(scope), storageKey);
+    });
+    const tracked = request.finally(() => {
+        if (persistedAccessOperations.get(queueKey) === tracked) persistedAccessOperations.delete(queueKey);
+    });
+    persistedAccessOperations.set(queueKey, tracked);
+    return tracked;
 }
 
 function shouldPersistDisplayAccess(value: ResourceAccess) {
@@ -173,33 +198,147 @@ function resourceAccessCacheExpiry(value: ResourceAccess, now = Date.now()) {
     return now + 5 * 60_000;
 }
 
-async function readPersistedDisplayAccess(scope: string, resourceId: string, variant: ResourceAccessVariant): Promise<CachedResourceAccess | undefined> {
+async function readPersistedDisplayAccess(scope: string, resourceId: string, variant: ResourceAccessVariant, generation: number): Promise<CachedResourceAccess | undefined> {
     try {
-        const raw = await localForageStorageForScope(scope).getItem(persistedDisplayAccessKey(resourceId, variant));
-        if (!raw) return undefined;
-        const parsed = JSON.parse(raw) as Partial<CachedResourceAccess>;
-        if (!parsed.value?.url || !shouldPersistDisplayAccess(parsed.value) || typeof parsed.expiresAt !== "number") return undefined;
-        const actualExpiresAt = parsed.value.expiresAt ? new Date(parsed.value.expiresAt).getTime() : Number.NaN;
-        if (parsed.expiresAt <= Date.now() || (Number.isFinite(actualExpiresAt) && actualExpiresAt <= Date.now() + 1_000)) {
-            await localForageStorageForScope(scope).removeItem(persistedDisplayAccessKey(resourceId, variant));
-            return undefined;
-        }
-        return parsed as CachedResourceAccess;
+        return await withPersistedDisplayAccess(scope, resourceId, variant, generation, async (storage, key) => {
+            const raw = await storage.getItem(key);
+            assertResourceRequestCurrent(generation, scope);
+            if (!raw) return undefined;
+            const parsed = JSON.parse(raw) as Partial<CachedResourceAccess>;
+            if (!parsed.value?.url || !shouldPersistDisplayAccess(parsed.value) || typeof parsed.expiresAt !== "number") return undefined;
+            const actualExpiresAt = parsed.value.expiresAt ? new Date(parsed.value.expiresAt).getTime() : Number.NaN;
+            if (parsed.expiresAt <= Date.now() || (Number.isFinite(actualExpiresAt) && actualExpiresAt <= Date.now() + 1_000)) {
+                await storage.removeItem(key);
+                return undefined;
+            }
+            return parsed as CachedResourceAccess;
+        });
     } catch {
         // 签名地址缓存只是性能优化，存储不可用或数据损坏时继续走后端签发。
         return undefined;
     }
 }
 
-async function persistDisplayAccess(scope: string, resourceId: string, variant: ResourceAccessVariant, entry: CachedResourceAccess) {
+async function persistDisplayAccess(scope: string, resourceId: string, variant: ResourceAccessVariant, entry: CachedResourceAccess, generation: number) {
     if (!shouldPersistDisplayAccess(entry.value) || entry.expiresAt <= Date.now()) return;
     try {
-        await localForageStorageForScope(scope).setItem(persistedDisplayAccessKey(resourceId, variant), JSON.stringify(entry));
+        await withPersistedDisplayAccess(scope, resourceId, variant, generation, async (storage, key) => {
+            if (entry.expiresAt > Date.now()) await storage.setItem(key, JSON.stringify(entry));
+        });
     } catch {
         // 不把本地缓存失败升级为资源访问失败。
     }
 }
 let accessGeneration = 0;
+
+export type ResourceAccessContext = Readonly<{ scope: string; generation: number }>;
+export type ReadyResourceImage = Readonly<{
+    url: string;
+    expiresAt: number;
+    sourceKey: string;
+    sourceVariant: ResourceAccessVariant;
+    revision: string;
+}>;
+const MAX_READY_RESOURCE_IMAGES = 500;
+const readyResourceImages = new Map<string, ReadyResourceImage>();
+
+export function captureResourceAccessContext(): ResourceAccessContext {
+    return { scope: getActiveUserScope(), generation: accessGeneration };
+}
+
+export function isResourceAccessContextCurrent(context: ResourceAccessContext) {
+    return context.scope === getActiveUserScope() && context.generation === accessGeneration;
+}
+
+function displayAccessKey(scope: string, id: string, variant: ResourceAccessVariant) {
+    return `${scope}:${id}:display:${variant}:`;
+}
+
+export function peekReadyResourceImage(
+    storageKey: string | undefined,
+    variant: ResourceAccessVariant,
+    context: ResourceAccessContext,
+): ReadyResourceImage | undefined {
+    if (!isResourceAccessContextCurrent(context)) return undefined;
+    const id = resourceIdFromStorageKey(storageKey);
+    if (!id) return undefined;
+    const key = displayAccessKey(context.scope, id, variant);
+    const ready = readyResourceImages.get(key);
+    if (!ready || ready.expiresAt <= Date.now()) return undefined;
+    if (accessRequests.get(key)?.forceRefresh || accessRequests.get(ready.sourceKey)?.forceRefresh) return undefined;
+    return ready;
+}
+
+function invalidateReadyResourceAccess(key: string) {
+    for (const [readyKey, ready] of readyResourceImages) {
+        if (readyKey === key || ready.sourceKey === key) readyResourceImages.delete(readyKey);
+    }
+}
+
+export function rememberReadyResourceImage(
+    storageKey: string,
+    variant: ResourceAccessVariant,
+    access: ResourceAccess,
+    requestedAccess: ResourceAccess | undefined,
+    context: ResourceAccessContext,
+): void {
+    if (!isResourceAccessContextCurrent(context)) return;
+    const id = resourceIdFromStorageKey(storageKey);
+    if (!id || access.resourceId !== id) return;
+    const key = displayAccessKey(context.scope, id, variant);
+    const sourceKey = displayAccessKey(context.scope, id, access.requestedVariant);
+    if (accessRequests.get(key)?.forceRefresh || accessRequests.get(sourceKey)?.forceRefresh) return;
+    const now = Date.now();
+    const source = accessCache.get(sourceKey);
+    if (!source || source.value !== access || source.expiresAt <= now) return;
+    const requested = accessCache.get(key);
+    const currentRequested = requested && requested.expiresAt > now ? requested.value : undefined;
+    if (currentRequested !== requestedAccess) return;
+    const url = resolveResourceAccessURL(access.url);
+    if (!url || /^(blob|data):/i.test(url)) return;
+    for (const [oldKey, oldEntry] of readyResourceImages) {
+        if (oldEntry.expiresAt <= now) readyResourceImages.delete(oldKey);
+    }
+    readyResourceImages.delete(key);
+    while (readyResourceImages.size >= MAX_READY_RESOURCE_IMAGES) {
+        const oldest = readyResourceImages.keys().next().value;
+        if (oldest === undefined) break;
+        readyResourceImages.delete(oldest);
+    }
+    readyResourceImages.set(key, {
+        url,
+        expiresAt: source.expiresAt,
+        sourceKey,
+        sourceVariant: access.requestedVariant,
+        revision: access.revision,
+    });
+}
+
+export function touchReadyResourceImage(
+    storageKey: string,
+    variant: ResourceAccessVariant,
+    expectedURL: string,
+    context: ResourceAccessContext,
+): void {
+    const ready = peekReadyResourceImage(storageKey, variant, context);
+    if (!ready || ready.url !== expectedURL) return;
+    const key = displayAccessKey(context.scope, resourceIdFromStorageKey(storageKey), variant);
+    readyResourceImages.delete(key);
+    readyResourceImages.set(key, ready);
+}
+
+export function forgetReadyResourceImage(
+    storageKey: string,
+    variant: ResourceAccessVariant,
+    failedURL: string,
+    context: ResourceAccessContext,
+): void {
+    if (!isResourceAccessContextCurrent(context)) return;
+    const id = resourceIdFromStorageKey(storageKey);
+    if (!id) return;
+    const key = displayAccessKey(context.scope, id, variant);
+    if (readyResourceImages.get(key)?.url === failedURL) readyResourceImages.delete(key);
+}
 
 /**
  * Drop every in-memory access descriptor when the authenticated scope changes.
@@ -217,6 +356,7 @@ export function clearResourceAccessCache() {
     pendingResourceAccess.clear();
     accessCache.clear();
     accessRequests.clear();
+    readyResourceImages.clear();
     resourceCache.clear();
     resourceRequests.clear();
     missingResourceIds.clear();
@@ -449,10 +589,10 @@ async function completeResourceAccessBatchEntry(entry: PendingResourceAccess, it
     const cachedEntry = { value, expiresAt: resourceAccessCacheExpiry(value) } satisfies CachedResourceAccess;
     if (cachedEntry.expiresAt > Date.now()) {
         accessCache.set(entry.key, cachedEntry);
-        if (entry.payload.purpose === "display") await persistDisplayAccess(entry.scope, entry.payload.resourceId, entry.payload.variant, cachedEntry);
+        if (entry.payload.purpose === "display") await persistDisplayAccess(entry.scope, entry.payload.resourceId, entry.payload.variant, cachedEntry, entry.generation);
     }
     if (entry.generation !== accessGeneration || entry.scope !== getActiveUserScope()) {
-        accessCache.delete(entry.key);
+        if (accessCache.get(entry.key) === cachedEntry) accessCache.delete(entry.key);
         throw resourceAccessAbortError();
     }
     return value;
@@ -496,41 +636,61 @@ async function flushResourceAccessBatch() {
     }
 }
 
-export async function getResourceAccess(storageKey: string | undefined, purpose: ResourceAccessPurpose = "display", variant: ResourceAccessVariant = "original", downloadName = "", fetchOptions: ResourceAccessFetchOptions = {}) {
+export function getResourceAccess(
+    storageKey: string | undefined,
+    purpose: ResourceAccessPurpose = "display",
+    variant: ResourceAccessVariant = "original",
+    downloadName = "",
+    fetchOptions: ResourceAccessFetchOptions = {},
+): Promise<ResourceAccess> {
     const id = resourceIdFromStorageKey(storageKey);
-    if (!id) throw new Error("当前媒体尚未上传到后端资源存储");
+    if (!id) return Promise.reject(new Error("当前媒体尚未上传到后端资源存储"));
     const scope = getActiveUserScope();
     const generation = accessGeneration;
-    const key = `${scope}:${id}:${purpose}:${variant}:${downloadName}`;
+    const key = purpose === "display" && !downloadName ? displayAccessKey(scope, id, variant) : `${scope}:${id}:${purpose}:${variant}:${downloadName}`;
     const forceRefresh = fetchOptions.forceRefresh === true;
-    if (forceRefresh) {
-        accessCache.delete(key);
-        const inFlightRefresh = accessRequests.get(key);
-        if (inFlightRefresh) return inFlightRefresh;
-        if (purpose === "display") {
-            try {
-                await localForageStorageForScope(scope).removeItem(persistedDisplayAccessKey(id, variant));
-            } catch {
-                // Persisted address caching is optional; the network request below remains authoritative.
-            }
-        }
-    }
-    const cached = accessCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.value;
     const pending = accessRequests.get(key);
-    if (pending) return pending;
-    let request!: Promise<ResourceAccess>;
-    request = (async () => {
+    if (pending && (!forceRefresh || pending.forceRefresh)) return pending.promise;
+    if (!forceRefresh) {
+        const cached = accessCache.get(key);
+        if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value);
+    }
+    if (forceRefresh) invalidateReadyResourceAccess(key);
+    let entry!: ResourceAccessRequest;
+    const promise = Promise.resolve().then(async () => {
         try {
-            // 只跨页面复用普通展示地址。下载和模型输入地址可能包含更敏感的权限/文件名，仍只保留内存缓存。
-            if (purpose === "display") {
-                const persisted = await readPersistedDisplayAccess(scope, id, variant);
+            assertResourceRequestCurrent(generation, scope);
+            if (forceRefresh && pending) {
+                try {
+                    await pending.promise;
+                } catch {
+                    // 普通在途请求失败不阻断本次强制刷新；会话失效由下一行统一拦截。
+                }
+                assertResourceRequestCurrent(generation, scope);
+            }
+            if (forceRefresh) {
+                accessCache.delete(key);
+                invalidateReadyResourceAccess(key);
+                if (purpose === "display") {
+                    try {
+                        await withPersistedDisplayAccess(scope, id, variant, generation, async (storage, key) => {
+                            await storage.removeItem(key);
+                        });
+                    } catch {
+                        // Persisted address caching is optional; the network request below remains authoritative.
+                    }
+                    assertResourceRequestCurrent(generation, scope);
+                }
+            } else if (purpose === "display") {
+                // 只跨页面复用普通展示地址。下载和模型输入地址可能包含更敏感的权限/文件名，仍只保留内存缓存。
+                const persisted = await readPersistedDisplayAccess(scope, id, variant, generation);
                 assertResourceRequestCurrent(generation, scope);
                 if (persisted) {
                     accessCache.set(key, persisted);
                     return persisted.value;
                 }
             }
+            assertResourceRequestCurrent(generation, scope);
             return await enqueueResourceAccess({
                 key,
                 scope,
@@ -541,11 +701,12 @@ export async function getResourceAccess(storageKey: string | undefined, purpose:
             if (error instanceof ApiError) throw new Error(error.message || "获取对象存储地址失败");
             throw error;
         } finally {
-            if (accessRequests.get(key) === request) accessRequests.delete(key);
+            if (accessRequests.get(key) === entry) accessRequests.delete(key);
         }
-    })();
-    accessRequests.set(key, request);
-    return request;
+    });
+    entry = { promise, forceRefresh };
+    accessRequests.set(key, entry);
+    return promise;
 }
 
 /** 模型上游读取资源使用更长 TTL，但仍走统一资源访问合同。 */

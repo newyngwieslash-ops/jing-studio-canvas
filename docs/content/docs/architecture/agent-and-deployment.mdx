@@ -1,0 +1,153 @@
+---
+title: Agent 运行机制与部署边界
+description: Go 协调器、Pi 运行时、工具审批、会话恢复与生产部署的源码导读。
+---
+
+# Agent 运行机制与部署边界
+
+本文基于当前工作区源码与配置。Agent 由 Go 业务治理层与 Node 会话执行层协作完成；独立 `yingce-agent` 是部署和进程边界，权限、计费、工具写入和持久状态仍由 Go 后端负责。
+
+本文未启动模型、容器、更新器或生产服务。相邻测试是维护入口，不表示本次已运行通过。工作区其他任务的未提交变更不一定已进入发布镜像。
+
+## 1. 组成与责任
+
+| 层 | 入口 | 责任 |
+| --- | --- | --- |
+| HTTP | [handler/agent.go](../../../../backend/internal/handler/agent.go) | 登录态、查询、审批、取消、SSE |
+| 协调器 | [cloud_agent_pi_coordinator.go](../../../../backend/internal/app/cloud_agent_pi_coordinator.go) | 启动、去重、恢复、退出等待、终态 |
+| 请求组装 | [cloud_agent_pi_request.go](../../../../backend/internal/app/cloud_agent_pi_request.go) | 工具、技能、权限、画像、模型窗口、快照 |
+| 模式选择 | [cloud_agent_pi_runtime.go](../../../../backend/internal/app/cloud_agent_pi_runtime.go) | embedded 或 remote |
+| Node 会话 | [agent-runtime.mjs](../../../../backend/agent-runtime/pi/agent-runtime.mjs) | Pi session、消息转换、工具调用、压缩、JSONL |
+| Go bridge | [runtime/runtime.go](../../../../backend/internal/agent/runtime/runtime.go) | `/model`、`/tool`、`/event` 与临时凭据 |
+| 独立服务 | [server.mjs](../../../../yingce-agent/server.mjs) | 鉴权、限流、排队、Node 子进程 |
+| 持久层 | [repository/cloud_agent.go](../../../../backend/internal/repository/cloud_agent.go) | 归属、revision、事务、快照条件更新 |
+
+`startCloudAgentPi` 是代码标注的生产入口。`cloud_agent_runtime*.go` 保留状态推进和工具逻辑，Pi 工具桥复用业务能力，不能将其画成第二套同时启动的 Agent。
+
+## 2. 会话主链与三条回调
+
+1. 浏览器通过 `POST /api/agent/runs` 创建运行，续轮也有 `POST /api/agent/runs/:id/messages`，身份来自登录态。
+2. `startCloudAgentPi` 在 `piRunners` 中登记，相同 run 已在执行时直接返回，避免重复进程写同一快照。
+3. `runCloudAgentPiSession` 读取业务状态和数据库 JSONL，构造 canonical 消息，再调用 `buildEnhancedPiRequest`。
+4. Node 接收快照而非服务端路径，在自己的临时目录重建会话并创建 Pi session。
+5. 模型、工具、事件回调 Go；协调器区分完成、等待审批、等待用户和失败。
+
+已持久化的 `waiting_approval` / `waiting_user` 优先于运行时退出错误。`cloudAgentPiTurnSettled` 检查本轮快照是否已有完整最终答复且无待处理事项，满足时仅收尾，避免重复模型调用；插话续跑、待办催办提示词仍需真正恢复。见 [协调器](../../../../backend/internal/app/cloud_agent_pi_coordinator.go)。
+
+| 回调 | 方向 | 作用 |
+| --- | --- | --- |
+| `POST /model` | Pi provider → Go `cloudAgentPiModel` | 模型调用进入平台任务、渠道、计费、错误处理 |
+| `POST /tool` | Pi tool → Go `cloudAgentPiTool` | 校验参数、能力、归属、审批、副作用 |
+| `POST /event` | Pi 事件队列 → Go `cloudAgentPiEvent` | 消息、快照、压缩生命周期状态 |
+
+实现见 [模型桥](../../../../backend/internal/app/cloud_agent_pi_model.go)、[工具与消息桥](../../../../backend/internal/app/cloud_agent_pi_bridge.go)、[事件桥](../../../../backend/internal/app/cloud_agent_pi_events.go)。Node `eventChain` 串行提交事件，下次模型/工具调用等待该链，避免请求先于状态落库。SDK retry 关闭，由 Go 模型桥决定重试，避免双层重试相乘。
+
+### 运行时能力边界
+
+`customTools` 由 Go 下发，`sessionConfig.tools` 只含平台工具。`SettingsManager` 使用 `projectTrusted: false`；`DefaultResourceLoader` 的 `noExtensions`、`noSkills`、`noPromptTemplates`、`noThemes`、`noContextFiles` 均为 `true`。
+
+Node 不自动读取工作目录 `.pi` 或上层 `.agents/skills`，不启用 SDK 默认 shell/文件工具。技能由后端受控读取。这是配置隔离，不等于操作系统沙箱。见 [agent-runtime.mjs](../../../../backend/agent-runtime/pi/agent-runtime.mjs)。
+
+## 3. embedded 与 remote
+
+| 项目 | embedded | remote |
+| --- | --- | --- |
+| 条件 | `YINGCE_AGENT_URL` 空 | `YINGCE_AGENT_URL` 非空 |
+| Go 入口 | `agentruntime.Run` | `yingceagent.Run` |
+| Node 启动方 | Go 后端本地子进程 | 独立 Agent 服务 |
+| bridge | `127.0.0.1:0` | `0.0.0.0:0`，公布 `YINGCE_AGENT_BRIDGE_HOST` |
+| 输入/输出 | stdin JSON / stdout NDJSON | `POST /v1/runs` / HTTP NDJSON |
+| 恢复材料 | 数据库 JSONL | 同一 JSONL 随请求传递 |
+
+embedded 是 Go 管理的 Node 子进程，并非把 JavaScript VM 嵌入 Go。服务 Token 至少 32 字符，用于 Go → 独立服务；`StartBridge` 另为每次运行生成随机 bearer token，用于 Node → Go。
+
+生产 `YINGCE_AGENT_BRIDGE_HOST=backend`，Agent 需要访问后端动态端口，只有 8080 可达不足以证明回调正常。remote 失败直接返回，不回退 embedded，因为失败可能发生在工具执行后，切换本地可能重复写入或收费。见 [选择器](../../../../backend/internal/app/cloud_agent_pi_runtime.go)、[远程客户端](../../../../backend/internal/agent/yingceagent/client.go)。
+
+独立服务默认并发 30、配置上限 64；默认子进程 V8 old-space 为 512 MB。内存等待队列控制入场，连接关闭移除等待者，已运行子进程随响应关闭收到 `SIGTERM`。该队列不持久化，恢复依赖 Go 数据库。`GET /healthz` 只返回 active、limit、queued，不验证模型和审批链路。
+
+## 4. 工具策略与审批
+
+[tool/policy.go](../../../../backend/internal/agent/tool/policy.go) 将工具分为控制 `KindControl`、读取 `KindRead`、写入 `KindWrite`、收费媒体 `KindMedia`、临时准备 `KindPrepare`。例子分别是 `plan_update`、`canvas_get_state`、`canvas_apply_ops`、`generate_media`、`previs_preview`。
+
+`Allowed(scope)` 按服务端推导的画布、技能、短剧、只读、记忆范围决定可见性；可见不替代执行时资源归属校验。缓存和版本作用域也由策略表维护。`ApprovalRequired` 规定媒体始终审批，普通写入在 `request_approval` 下审批，`AlwaysApprove` 工具如 `drama_adopt_canvas_media` 即使自动模式也审批。
+
+`advanceCloudAgentTool` 准备预览，写入 `waiting_approval` 并产生 `approval_requested`。媒体同时准备请求、报价及资源租约，弹窗出现不表示收费已提交。Node 收到 `/tool` 的 `pause` 后中止会话并保存暂停结果。
+
+用户向 `POST /api/agent/runs/:id/approvals/:approvalId/decision` 提交 `approve` 或 `reject`；handler 限制字段、请求体、reason 后调用 `DecideCloudAgentApproval`。`resumeCloudAgentPi` 若遇旧进程刷新快照，会登记 restart 等其退出，防止快速批准时恢复被去重丢弃。
+
+批准后由 Go 执行已批准工具，再带持久回执恢复 Pi；媒体任务通过后台 waiter 等待完成后才恢复。拒绝将 run 置为 `rejected`，不生成后续工具结果、画布修改、生成任务或模型请求。因此原 `/tool` 请求不会跨人工审批持续阻塞。见 [审批决定与续跑](../../../../backend/internal/app/cloud_agent_runtime_media.go)。
+
+执行仍需重验归属、当前对象、锁和预算。见 [工具推进](../../../../backend/internal/app/cloud_agent_runtime_tools.go)、[审批预览](../../../../backend/internal/app/cloud_agent_approval_preview.go)、[媒体审批](../../../../backend/internal/app/cloud_agent_media_approval.go)。
+
+## 5. SSE、快照与检查点
+
+`GET /api/agent/runs/:id/events` 的游标是事件 `seq`，从 `after` 或 `Last-Event-ID` 解析；不是 run ID 或 revision。
+
+| SSE 消息 | id | 含义 |
+| --- | --- | --- |
+| `agent_event` | seq | 可重放增量 |
+| `run_snapshot` | 无 | 状态观察，不推进游标，不重复附带 Events |
+| heartbeat | 无 | 空闲保活 |
+
+handler 每秒检查 revision，空闲 15 秒保活。到达 completed/failed/cancelled/rejected 且无清理待办时结束连接。断开 SSE 不等于取消，后者有独立接口。见 [agent.go](../../../../backend/internal/handler/agent.go)。
+
+| 状态载体 | 内容与用途 |
+| --- | --- |
+| run 业务状态 | 审批、任务、工具进度、事件和 revision，支持业务恢复 |
+| Pi `SessionJSONL` | SDK 原生会话，支持新 Node 进程恢复 session |
+| 语义 `Checkpoint` | 摘要、设计、待办、决策、约束、偏好，压缩模型上下文 |
+
+`SaveCloudAgentPiSession` 更新绑定 `run_id + user_id + expectedRevision`，防止旧进程覆盖新快照。`MutateCloudAgent` 锁定 run 后事务处理状态及关联写入；这不等于外部副作用严格只执行一次。见 [repository/cloud_agent.go](../../../../backend/internal/repository/cloud_agent.go)。
+
+[agentcontext/checkpoint.go](../../../../backend/internal/agentcontext/checkpoint.go) 独立于 HTTP/app/repository，版本 1，最大 64 KiB，拒绝未知字段、尾随数据、非法版本和编码。`BuildPrompt` 将历史当不可信数据，要求已提交/运行任务先查状态，不从摘要推导重新收费授权。
+
+触发、预算、降级由 app 协调，Pi 也有会话压缩策略及事件。应区分语义合同、业务协调和 SDK 压缩。见 [上下文压缩](../../../../backend/internal/app/cloud_agent_context_compaction.go)、[预算](../../../../backend/internal/app/cloud_agent_context_budget.go)、[Pi 事件](../../../../backend/internal/app/cloud_agent_pi_events.go)。
+
+## 6. 技能与插件
+
+[skills_agent.go](../../../../backend/internal/skills/skills_agent.go) 的 `AgentSkillCatalog` 返回已安装或自建且启用技能。市场目录用于推荐，不授予正文读取。`AgentReadableSkillPath` 仅允许 `.md`、`.txt`、`.json`，脚本和二进制不是 Agent 可执行内容。
+
+[cloud_agent_tools_skills.go](../../../../backend/internal/app/cloud_agent_tools_skills.go) 基于本轮冻结快照做内存检索，中文支持 2-gram。`skill_search` 返回技能/方法卡路径，`skill_read_file` 渐进读正文，不整体内联；版本与 hash 描述本轮材料。产品技能库与开发者电脑供 Codex 使用的 Archify 不同，本次制图不表示产品已安装可执行 Archify。
+
+[protocol_plugins.go](../../../../backend/internal/app/protocol_plugins.go) 的 `newPluginRuntime` 在数据目录维护 `plugin_registry.json`、`plugin-packages`，引导内建插件并重载注册表；protocol 与 payment registry 各有职责。
+
+[plugin_management.go](../../../../backend/internal/app/plugin_management.go) 区分 protocol/application/payment/sms。上传 manifest 不能自行决定特权和激活范围，管理策略由宿主计算；官方应用通常按用户启用，协议、支付、短信各有系统范围。不能概括为任意第三方 JS 主进程执行，也不能将开放市场或外部 SDK 提案写成现状。前端贡献点见 [前端架构](./frontend.mdx)。
+
+## 7. 生产部署
+
+[docker-compose.deploy.yml](../../../../docker-compose.deploy.yml) 定义六个服务：
+
+| 服务 | 职责和依赖 | 数据与网络 |
+| --- | --- | --- |
+| postgres | PostgreSQL 17 | 独立卷，无宿主发布端口 |
+| redis | Redis 7.4，AOF | 独立卷，无宿主发布端口 |
+| migrate | 后端镜像 `migrate-schema up`，等数据库健康 | backend 等待成功 |
+| yingce-agent | 会话子进程 | 无持久卷，无公网端口 |
+| backend | API、Worker、bridge、业务治理 | `/data`、updater socket，内网 |
+| web | 静态前端、Nginx | 唯一公网入口默认 3000，web-data |
+
+backend 使用 PostgreSQL、`REDIS_URL=redis://redis:6379/0`、`CANVAS_AUTO_MIGRATE=false`，等数据库/Redis/Agent 健康及 migrate 成功。web 等 backend 健康；探针不覆盖全部业务。
+
+web-data 保留当前及上一版本 hashed chunks，减少旧标签页资源缺失。后端数据卷与数据库卷不同，媒体和插件文件不能仅靠数据库备份替代；OSS/CDN 对象需独立管理。
+
+backend/web 镜像显式配置并由安装脚本固定 digest。Agent YAML 有 tag 兼容默认值，当前安装脚本及更新器仍会校验记录 Agent digest，不能据 fallback 判断实际部署未固定。
+
+## 8. Host Updater 与开发差异
+
+[updaterclient/client.go](../../../../backend/internal/updaterclient/client.go) 通过 Unix socket + bearer token 调用宿主 `/v1/status`、`/v1/check`、`/v1/update`、`/v1/rollback`。生产挂载 updater socket，不直接给业务容器 Docker socket。
+
+[manager.go](../../../../backend/internal/hostupdate/manager.go) 的 `runUpdate` 管理阶段，[manager_ops.go](../../../../backend/internal/hostupdate/manager_ops.go) 实现 Release/镜像 digest 校验、按 `SHA256SUMS` 校验更新器、备份校验、目标迁移、更新、版本健康检查和失败回滚。数据库及旧部署恢复分别处理错误。
+
+该机制依赖受管目录、Compose、环境文件、Release 资产及 PostgreSQL 恢复路径，不适用于任意自定义 Compose。源码构建或 SQLite 需另确认迁移策略。见 [安装脚本](../../../../scripts/install-server-image.sh)、[在线更新](../backend/system-update.mdx)。
+
+[docker-compose.dev.yml](../../../../docker-compose.dev.yml) 挂载源码，后端默认 SQLite，Redis 由环境可选提供；web 用 Bun/Vite 代理后端。后端默认宿主绑定 `127.0.0.1:8080`，前端默认 3000。开发数据 `.local/project-workbench-debug` 设置 `create_host_path: false`，避免缺目录时悄悄生成另一套数据库；宿主运行也须显式指定。
+
+未设 `YINGCE_AGENT_URL` 时走 embedded；`RuntimeDir` 支持 `CANVAS_PI_RUNTIME_DIR`，runtime 和依赖需提前准备。变量见 [.env.example](../../../../.env.example)；`CANVAS_PUBLIC_BASE_URL` 用于上游短时资源链接。生产 CORS、HTTPS、私网精确白名单不能照搬开发默认值。
+
+## 9. 文档现状与验证边界
+
+本次工作区未发现 `docs/package.json`、`docs/source.config.ts`、`docs/AGENT_LOCAL_DEVELOPMENT.md`；源码/配置检索未发现挂载 `docs/content/docs` 的运行入口。因此专题当前按仓库 Markdown/MDX 源阅读，不能依旧约定声称可独立构建 Next.js/Fumadocs 文档应用。Archify HTML 是附件，不代表新增产品路由；生成、浏览器证据和视觉审查由总览分别记录。
+
+推荐按模式选择 → 协调器 → Node session → 三条 bridge → repository revision → SSE 阅读。相邻测试包括 [runtime_test.go](../../../../backend/internal/agent/runtime/runtime_test.go)、[client_test.go](../../../../backend/internal/agent/yingceagent/client_test.go)、[policy_test.go](../../../../backend/internal/agent/tool/policy_test.go)、[审批恢复](../../../../backend/internal/app/cloud_agent_approval_resume_test.go)、[Pi 快照](../../../../backend/internal/repository/cloud_agent_pi_session_test.go)、[checkpoint_test.go](../../../../backend/internal/agentcontext/checkpoint_test.go)、[更新备份](../../../../backend/internal/hostupdate/manager_ops_test.go)。
+
+真实联调需覆盖远程失败无重复提交、审批恢复不重复计费、SSE 游标重放、Node 异常恢复、升级任务收尾及迁移失败回退。本次未执行这些场景，静态阅读不能替代运行验收。

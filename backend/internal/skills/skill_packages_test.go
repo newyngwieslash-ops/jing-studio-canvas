@@ -163,6 +163,91 @@ func TestArchiveFromZipNormalizesWrapperAndNestedFiles(t *testing.T) {
 	}
 }
 
+func TestArchiveFromZipSkipsOversizedNonAgentFiles(t *testing.T) {
+	oversized := strings.Repeat("x", maxSkillFileBytes+1)
+	archive, err := archiveFromZip(skillZip(t, map[string]string{
+		"director/SKILL.md":   "# AI 导演\n\n导演工作流",
+		"director/demo.mp4":   oversized,
+		"director/notes.md":   "# Notes",
+	}), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := archive.Files["demo.mp4"]; exists {
+		t.Fatal("expected oversized non-agent file to be skipped")
+	}
+	if string(archive.Files["notes.md"]) != "# Notes" {
+		t.Fatalf("expected readable file to be kept: %#v", archive.Files)
+	}
+	if _, err := archiveFromZip(skillZip(t, map[string]string{
+		"director/SKILL.md": "# AI 导演\n\n导演工作流",
+		"director/huge.md":  oversized,
+	}), ""); err == nil {
+		t.Fatal("expected oversized markdown file to be rejected")
+	}
+}
+
+func TestArchiveFromZipNormalizesMultiSkillSuiteWithController(t *testing.T) {
+	data := skillZip(t, map[string]string{
+		"manju-suite-main/short-drama-director/SKILL.md":        "---\nname: short-drama-director\nversion: \"7.4.26\"\ndescription: 总控技能\n---\n# 总控\n调度 sd-script-engine/SKILL.md 与 sd-shot-engine/SKILL.md，读取 references/gate.md\n",
+		"manju-suite-main/short-drama-director/references/gate.md": "# Gate",
+		"manju-suite-main/sd-script-engine/SKILL.md":            "---\nname: sd-script-engine\ndescription: 剧本子技能\n---\n由 short-drama-director 调度\n",
+		"manju-suite-main/sd-shot-engine/SKILL.md":              "---\nname: sd-shot-engine\ndescription: 分镜子技能\n---\n由 short-drama-director 调度\n",
+		"manju-suite-main/assets/demo.md":                       "# Demo",
+	})
+	for _, subdir := range []string{"", "short-drama-director"} {
+		archive, err := archiveFromZip(data, subdir)
+		if err != nil {
+			t.Fatalf("subdir %q: %v", subdir, err)
+		}
+		if archive.Metadata.Name != "short-drama-director" || archive.Metadata.Version != "7.4.26" {
+			t.Fatalf("subdir %q: metadata = %#v", subdir, archive.Metadata)
+		}
+		if string(archive.Files["references/gate.md"]) != "# Gate" {
+			t.Fatalf("subdir %q: controller reference not promoted to root: %#v", subdir, archive.Files)
+		}
+		if string(archive.Files["sd-script-engine/SKILL.md"]) == "" || string(archive.Files["sd-shot-engine/SKILL.md"]) == "" || string(archive.Files["assets/demo.md"]) != "# Demo" {
+			t.Fatalf("subdir %q: suite sub-skills not preserved: %#v", subdir, archive.Files)
+		}
+	}
+	subArchive, err := archiveFromZip(data, "sd-script-engine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subArchive.Metadata.Name != "sd-script-engine" || len(subArchive.Files) != 1 {
+		t.Fatalf("sub-skill archive = %#v", subArchive)
+	}
+}
+
+func TestExtractGitHubZipCommit(t *testing.T) {
+	want := "6f16955c57053d77ea0ffbdbbf3a7985a3e0080a"
+	var commentZip bytes.Buffer
+	writer := zip.NewWriter(&commentZip)
+	if err := writer.SetComment(want); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := writer.Create("repo-main/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("# Skill")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := extractGitHubZipCommit(commentZip.Bytes()); got != want {
+		t.Fatalf("comment commit = %q, want %q", got, want)
+	}
+
+	wrapperZip := skillZip(t, map[string]string{
+		"manju-laoli-skill-" + want + "/SKILL.md": "# Skill",
+	})
+	if got := extractGitHubZipCommit(wrapperZip); got != want {
+		t.Fatalf("wrapper commit = %q, want %q", got, want)
+	}
+}
+
 func TestArchiveFromZipRejectsTraversalAndMultipleSkills(t *testing.T) {
 	for name, files := range map[string]map[string]string{
 		"traversal": {"../SKILL.md": "# Bad"},
