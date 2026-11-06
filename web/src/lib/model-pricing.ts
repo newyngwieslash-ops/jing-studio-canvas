@@ -61,12 +61,35 @@ export function priceTierSummaryLabel(tiers: ModelPriceTier[], capability?: Mode
             .filter((value) => Number.isFinite(value) && value >= 0);
     const fixedRequestValues = unitPrices("fixed_request");
     const perSecondValues = unitPrices("per_second");
-    const tokenValues = tiers.filter((tier) => tier.billingMode === "token").map((tier) => tier.outputTokenPriceMicrocredits / 1_000_000).filter((value) => Number.isFinite(value) && value >= 0);
-    return [
-        fixedRequestValues.length ? formatPriceRange(fixedRequestValues, "积分") : "",
-        perSecondValues.length ? formatPriceRange(perSecondValues, "积分/秒") : "",
-        tokenValues.length ? `${capability === "video" ? "" : "输出 "}${formatPriceRange(tokenValues, capability === "video" ? "积分/百万视频 Token" : "积分/百万 Token")}` : "",
-    ].filter(Boolean).join(" · ") || "未配置";
+    // 分时与上下文规则也计入输出价区间，用户看到的是可能被收取的全部输出单价。
+    const tokenTiers = tiers.filter((tier) => tier.billingMode === "token");
+    const tokenValues = tokenTiers
+        .flatMap((tier) => [tier.outputTokenPriceMicrocredits, ...(tier.tokenPriceRules || []).map((rule) => rule.outputTokenPriceMicrocredits)])
+        .map((value) => value / 1_000_000)
+        .filter((value) => Number.isFinite(value) && value >= 0);
+    const timeBased = tokenTiers.some((tier) => tier.tokenPriceRules?.length);
+    return (
+        [
+            fixedRequestValues.length ? formatPriceRange(fixedRequestValues, "积分") : "",
+            perSecondValues.length ? formatPriceRange(perSecondValues, "积分/秒") : "",
+            tokenValues.length ? `${capability === "video" ? "" : "输出 "}${formatPriceRange(tokenValues, capability === "video" ? "积分/百万视频 Token" : "积分/百万 Token")}${timeBased ? " · 分时" : ""}` : "",
+        ]
+            .filter(Boolean)
+            .join(" · ") || "未配置"
+    );
+}
+
+const WEEKDAY_LABELS = ["", "一", "二", "三", "四", "五", "六", "日"];
+
+/** 一条分时与上下文规则的用户可读说明，例如「周一至周五 00:30–08:30 · 输入 ≥ 32,000 Token：输入 1 / 输出 2 积分/百万 Token」。 */
+export function tokenPriceRuleDescription(rule: NonNullable<ModelPriceTier["tokenPriceRules"]>[number]) {
+    const days = [...(rule.weekdays || [])].sort((a, b) => a - b);
+    const contiguous = days.length > 2 && days.every((day, index) => index === 0 || day === days[index - 1] + 1);
+    const dayLabel = days.length === 7 ? "每天" : contiguous ? `周${WEEKDAY_LABELS[days[0]]}至周${WEEKDAY_LABELS[days[days.length - 1]]}` : days.map((day) => `周${WEEKDAY_LABELS[day]}`).join("、");
+    const format = (value: number) => value.toLocaleString("zh-CN");
+    const context = rule.maxInputTokens > 0 ? `输入 ${format(rule.minInputTokens)}–${format(rule.maxInputTokens)} Token` : rule.minInputTokens > 0 ? `输入 ≥ ${format(rule.minInputTokens)} Token` : "";
+    const price = (value: number) => (value / 1_000_000).toLocaleString("zh-CN", { maximumFractionDigits: 6 });
+    return `${[`${dayLabel} ${rule.start}–${rule.end}`, context].filter(Boolean).join(" · ")}：输入 ${price(rule.inputTokenPriceMicrocredits)} / 输出 ${price(rule.outputTokenPriceMicrocredits)} / 缓存读取 ${price(rule.cachedTokenPriceMicrocredits)} 积分/百万 Token`;
 }
 
 export function formatPriceRange(values: number[], suffix: string) {
@@ -84,18 +107,33 @@ export function modelQuoteDescription(quote: LogicalModelQuote) {
         if (estimate.referenceDurationEstimated) descriptions.push("未知的参考视频时长按 15 秒估算");
         if (estimate.dimensionsEstimated) descriptions.push("实际画幅尚未确定，尺寸按当前参数估算");
     }
-    if (quote.billingMode === "token") descriptions.push(estimate
-        ? "预估金额并非费用上限，成功任务优先按有效的实际用量结算；未返回用量时按火山引擎公式结算，额外预留不计入公式结算，可能补扣或退回差额"
-        : "预估金额并非费用上限，最终以成功任务返回的实际用量结算，可能补扣或退回差额");
+    if (quote.billingMode === "token")
+        descriptions.push(estimate ? "预估金额并非费用上限，成功任务优先按有效的实际用量结算；未返回用量时按火山引擎公式结算，额外预留不计入公式结算，可能补扣或退回差额" : "预估金额并非费用上限，最终以成功任务返回的实际用量结算，可能补扣或退回差额");
     return descriptions.join("；");
 }
 
+/**
+ * 通用入口的报价请求：直连系统渠道的文本 / 图片模型在前端按价格档位直接算价，不发服务端报价；
+ * 逻辑模型和直连视频模型（Token / 时长计费）才需要服务端报价。
+ */
 export function modelQuoteRequest(config: AiConfig, value: string, capability?: ModelCapability, requirements?: ModelRequirements): ModelQuoteRequest | undefined {
+    if (!capability || !value) return undefined;
+    const channel = resolveModelChannel(config, value);
+    const cost = channel.modelCosts?.find((item) => item.model === modelOptionName(value));
+    if (channel.scope === "system" && cost && !cost.logicalModelId && capability !== "video") return undefined;
+    return systemModelQuoteRequest(config, value, capability, requirements);
+}
+
+/**
+ * 任意系统模型（逻辑模型或直连渠道模型、任意能力）的服务端报价请求。
+ * 必须先拿到服务端报价才允许提交的流程（例如电商 Agent 的分析与整套出图）用这个入口。
+ */
+export function systemModelQuoteRequest(config: AiConfig, value: string, capability?: ModelCapability, requirements?: ModelRequirements): ModelQuoteRequest | undefined {
     if (!capability || !value) return undefined;
     const channel = resolveModelChannel(config, value);
     if (channel.scope !== "system") return undefined;
     const cost = channel.modelCosts?.find((item) => item.model === modelOptionName(value));
-    if (!cost || (!cost.logicalModelId && capability !== "video")) return undefined;
+    if (!cost) return undefined;
     const input = requirements?.input;
     const intent: ModelRequestIntent = {
         capability,
@@ -147,7 +185,9 @@ function priceSelectorForRequest(capability: ModelCapability | undefined, config
             }
             return requested;
         }
-        const imageQuality = String(options.quality ?? "").trim().toLowerCase();
+        const imageQuality = String(options.quality ?? "")
+            .trim()
+            .toLowerCase();
         const imageSize = String(options.size ?? "").trim();
         Object.assign(requested, imagePriceSelector(imageQuality, imageSize, modelCapabilityConfigFor(config, config.model || config.imageModel)?.image));
     }

@@ -44,14 +44,10 @@ func dramaSegmentVideoDone(segment model.DramaSegment) bool {
 
 // dramaVideoWaitReason 说明第 index 段视频为何还不能提交；空串表示调度会提交它。调度与详情页共用。
 func dramaVideoWaitReason(settings DramaSettings, p *model.DramaProduction, e *model.DramaEpisode, segments []model.DramaSegment, index int, shots []model.DramaShot, lookup func(string) (model.DramaCast, bool)) string {
+	if wait := dramaProductionWait(p); wait != "" {
+		return wait
+	}
 	switch {
-	case p.Status == model.DramaStatusPaused:
-		if reason := strings.TrimSpace(p.PauseReason); reason != "" {
-			return "制作已暂停：" + reason
-		}
-		return "制作已暂停"
-	case p.Status != model.DramaStatusRunning:
-		return "制作未在运行，点“继续制作”后开始"
 	case e.Stage == model.DramaEpisodeQueued || e.Stage == model.DramaEpisodeScript:
 		return "等待本集剧本完成"
 	case dramaMediaHeld(settings, e):
@@ -106,19 +102,26 @@ func segmentVideoChoice(segment model.DramaSegment, fallback DramaModelChoice) D
 
 // prepareDramaSegment is shared by the request preview and provider submission.
 // Reference numbering remains stable even when a model cannot accept every image.
-func (s *Service) prepareDramaSegment(settings DramaSettings, draft dramaSegmentDraft, segment model.DramaSegment, previous *model.DramaSegment, casts map[string]model.DramaCast) (DramaSegmentRequest, []any, error) {
+// 返回值依次是请求预演、随请求发送的参考图与参考音频（任务输入的媒体项）。
+func (s *Service) prepareDramaSegment(settings DramaSettings, draft dramaSegmentDraft, segment model.DramaSegment, previous *model.DramaSegment, casts map[string]model.DramaCast) (DramaSegmentRequest, []any, []any, error) {
 	if settings.parallelVideo() {
 		// 并行出片：每段只按参考图独立生成，不带上一段尾帧，也就不依赖上一段完成。
 		previous = nil
 	}
 	profile, err := s.dramaVideoProfile(segmentVideoChoice(segment, settings.Models.Video))
 	if err != nil {
-		return DramaSegmentRequest{}, nil, err
+		// 视频模型不可用时详情页仍展示本段并给出 Warning；数组字段必须是 []，null 会让制作台渲染参考图时崩溃。
+		return DramaSegmentRequest{AspectRatio: settings.AspectRatio, References: []DramaSegmentReference{}, AudioReferences: []DramaSegmentAudioReference{}}, nil, nil, err
 	}
 	screen := profile.screen(settings.AspectRatio, settings.VideoResolution)
-	request := DramaSegmentRequest{Seconds: production.SnapVideoSeconds(draft.view.DurationMs, profile.Durations), MaxVideoSeconds: profile.maxSeconds(), AspectRatio: settings.AspectRatio, Size: screen.Size, Resolution: screen.Resolution, PromptMaxChars: profile.PromptMaxChars, GenerateAudio: profile.GenerateAudio, References: []DramaSegmentReference{}}
+	request := DramaSegmentRequest{Seconds: production.SnapVideoSeconds(draft.view.DurationMs, profile.Durations), MaxVideoSeconds: profile.maxSeconds(), AspectRatio: settings.AspectRatio, Size: screen.Size, Resolution: screen.Resolution, PromptMaxChars: profile.PromptMaxChars, GenerateAudio: profile.GenerateAudio, References: []DramaSegmentReference{}, AudioReferences: []DramaSegmentAudioReference{}, ModelMaxAudios: profile.MaxAudios}
 	if draft.view.DurationMs > int64(request.MaxVideoSeconds)*1000 {
-		return request, nil, errors.New("剧情段超过所选视频模型的时长上限，请调整分镜时长或重新改编")
+		return request, nil, nil, errors.New("剧情段超过所选视频模型的时长上限，请调整分镜时长或重新改编")
+	}
+	if profile.video != nil {
+		if err := dramaSegmentDurationError(segment.SegmentIndex, request.Seconds, profile.video.Duration); err != nil {
+			return request, nil, nil, err
+		}
 	}
 	refs := []any{}
 	header := []string{}
@@ -129,7 +132,7 @@ func (s *Service) prepareDramaSegment(settings DramaSettings, draft dramaSegment
 			request.FirstFrameResourceID = previous.TailFrameResourceID
 			ref, err := s.dramaResourceReference(previous.TailFrameResourceID, "first-frame", "first_frame")
 			if err != nil {
-				return request, nil, err
+				return request, nil, nil, err
 			}
 			refs = append(refs, ref)
 		}
@@ -141,9 +144,9 @@ func (s *Service) prepareDramaSegment(settings DramaSettings, draft dramaSegment
 	}
 	if !profile.supports(request.Operation) {
 		if request.Operation == "image_to_video" {
-			return request, nil, errors.New(profile.continuityIssue(settings))
+			return request, nil, nil, errors.New(profile.continuityIssue(settings))
 		}
-		return request, nil, fmt.Errorf("所选模型不支持本段所需的 %s", request.Operation)
+		return request, nil, nil, fmt.Errorf("所选模型不支持本段所需的 %s", request.Operation)
 	}
 	capacity := profile.MaxImages
 	if previous != nil {
@@ -166,14 +169,14 @@ func (s *Service) prepareDramaSegment(settings DramaSettings, draft dramaSegment
 	for _, reference := range draft.view.Request.References {
 		cast, exists := casts[reference.CastID]
 		if !exists {
-			return request, nil, errors.New("剧情段引用的设定不存在")
+			return request, nil, nil, errors.New("剧情段引用的设定不存在")
 		}
 		reference.ResourceID = cast.ImageResourceID
 		reference.Sent = capacity > 0 && cast.ImageStatus == model.DramaMediaReady && cast.ImageResourceID != ""
 		if reference.Sent {
 			ref, err := s.dramaResourceReference(cast.ImageResourceID, reference.Label, "")
 			if err != nil {
-				return request, nil, err
+				return request, nil, nil, err
 			}
 			refs = append(refs, ref)
 			capacity--
@@ -197,6 +200,15 @@ func (s *Service) prepareDramaSegment(settings DramaSettings, draft dramaSegment
 		}
 		request.References = append(request.References, reference)
 	}
+	audios, err := s.dramaSegmentAudioReferences(&request, profile, draft.shots, casts, len(refs) > 0)
+	if err != nil {
+		return request, nil, nil, err
+	}
+	for _, reference := range request.AudioReferences {
+		if reference.Sent {
+			header = append(header, reference.Label+"："+reference.Name+"的声音（本段"+reference.Name+"的对白音色、语气与说话方式以此为准）")
+		}
+	}
 	if request.Warning == "" {
 		notes := []string{}
 		if len(missing) > 0 {
@@ -218,9 +230,84 @@ func (s *Service) prepareDramaSegment(settings DramaSettings, draft dramaSegment
 	}
 	// 给不出作品画幅时不提交：上游会按自己的默认画幅（多为横屏）出片，花了钱也用不上。
 	if screen.Issue != "" {
-		return request, refs, errors.New(screen.Issue)
+		return request, refs, audios, errors.New(screen.Issue)
 	}
-	return request, refs, nil
+	return request, refs, audios, nil
+}
+
+// dramaSegmentAudioReferences 列出本段开口说话、且指定了声音样本的角色（按开口顺序，造型归到所属角色），
+// 能发送的写成“参考音频N”并返回任务输入的媒体项。只在参考图生视频时发送：上游要求参考音频与至少一张参考图同时提供，
+// 以上一段尾帧作首帧的段不混用参考素材。没能发送的写明原因，该角色的对白按声线描述生成。
+func (s *Service) dramaSegmentAudioReferences(request *DramaSegmentRequest, profile dramaVideoProfile, shots []model.DramaShot, casts map[string]model.DramaCast, hasImages bool) ([]any, error) {
+	speakers := dramaSegmentVoicedSpeakers(shots, casts)
+	media := []any{}
+	for _, cast := range speakers {
+		reference := DramaSegmentAudioReference{CastID: cast.ID, Name: cast.Name, ResourceID: cast.VoiceSampleResourceID}
+		switch {
+		case profile.MaxAudios <= 0:
+			reference.Note = "所选视频模型不支持参考音频，按声线描述生成"
+		case request.Operation == "image_to_video":
+			reference.Note = "本段以上一段尾帧作首帧，不能同时附带参考音频；并行出片时每段都会带上角色声音"
+		case request.Operation != "reference_to_video":
+			reference.Note = "本段按文生视频生成，不能附带参考音频"
+		case !hasImages:
+			reference.Note = "本段没有可发送的参考图，参考音频需要与参考图一起发送"
+		case len(media) >= profile.MaxAudios:
+			reference.Note = fmt.Sprintf("超出视频模型参考音频上限（%d 段）", profile.MaxAudios)
+		default:
+			resource, err := s.repo.Resource(cast.VoiceSampleResourceID)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, err
+			}
+			switch {
+			case resource == nil || resource.Status != model.ResourceStatusReady || resource.Kind != "audio":
+				reference.Note = "声音样本已不可用，请重新指定"
+			case profile.MaxAudioSeconds > 0 && resource.DurationMs > int64(profile.MaxAudioSeconds)*1000:
+				reference.Note = fmt.Sprintf("声音样本 %d 秒，超过视频模型上限 %d 秒，请换一段更短的样本", (resource.DurationMs+999)/1000, profile.MaxAudioSeconds)
+			default:
+				reference.Sent = true
+				reference.Label = fmt.Sprintf("参考音频%d", len(media)+1)
+				media = append(media, map[string]any{"id": reference.Label, "name": reference.Label, "type": resource.MimeType, "mimeType": resource.MimeType, "storageKey": "resource:" + resource.ID, "bytes": resource.Size, "durationMs": resource.DurationMs})
+			}
+		}
+		request.AudioReferences = append(request.AudioReferences, reference)
+	}
+	return media, nil
+}
+
+// dramaSegmentVoicedSpeakers 是本段有台词、且指定了声音样本的角色（只取角色本体，造型沿用本体的声音），按开口顺序去重。
+func dramaSegmentVoicedSpeakers(shots []model.DramaShot, casts map[string]model.DramaCast) []model.DramaCast {
+	index := production.NewCastIndex()
+	for _, cast := range casts {
+		if cast.Kind == "character" && cast.ParentID == "" {
+			index.Add(cast.ID, append([]string{cast.Name}, decodeStringList(cast.AliasesJSON)...)...)
+		}
+	}
+	result := []model.DramaCast{}
+	seen := map[string]bool{}
+	for _, shot := range shots {
+		if strings.TrimSpace(shot.Dialogue) == "" || production.IsNarrator(shot.Speaker) {
+			continue
+		}
+		id, ok := index.Lookup(shot.Speaker)
+		if !ok || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if cast := casts[id]; cast.VoiceSampleResourceID != "" {
+			result = append(result, cast)
+		}
+	}
+	return result
+}
+
+// dramaSegmentDurationError 用任务准入同一份时长合同核对取整后的秒数：不被接受时点名段号、秒数与可选范围，
+// 而不是提交后才收到泛化的拒绝。segmentIndex 从 0 开始。
+func dramaSegmentDurationError(segmentIndex int, seconds int, duration VideoDurationConfig) error {
+	if videoDurationAllowed(duration, seconds) {
+		return nil
+	}
+	return fmt.Errorf("第 %d 段需要 %d 秒，所选模型只支持 %s；请调整分镜时长或换用其他视频模型", segmentIndex+1, seconds, videoDurationSupportLabel(duration))
 }
 
 // dramaCastImageState 是没能随请求发送的参考图当前状态，写进段视频的限制说明。
@@ -292,7 +379,7 @@ func (r *dramaRun) submitSegmentVideo(job *model.DramaJob) (*model.Task, bool, e
 		if draft.view.Index != segment.SegmentIndex {
 			continue
 		}
-		request, refs, err := r.s.prepareDramaSegment(r.settings, draft, *segment, previous, casts)
+		request, refs, audios, err := r.s.prepareDramaSegment(r.settings, draft, *segment, previous, casts)
 		if err != nil {
 			return nil, false, err
 		}
@@ -305,7 +392,7 @@ func (r *dramaRun) submitSegmentVideo(job *model.DramaJob) (*model.Task, bool, e
 		if request.FirstFramePending {
 			return nil, true, nil
 		}
-		for _, ref := range refs {
+		for _, ref := range append(append([]any{}, refs...), audios...) {
 			m := ref.(map[string]any)
 			id := strings.TrimPrefix(m["storageKey"].(string), "resource:")
 			if _, err := r.s.repo.ResourceForUser(r.project.UserID, id); err != nil {
@@ -332,7 +419,11 @@ func (r *dramaRun) submitSegmentVideo(job *model.DramaJob) (*model.Task, bool, e
 		}
 		payload, _ := json.Marshal(dramaRevisionPayload{Revision: segment.Revision, Seconds: request.Seconds})
 		job.PayloadJSON = string(payload)
-		task, err := r.createTaskWith(segmentVideoChoice(*segment, r.settings.Models.Video), "video", request.Operation, prompt, map[string]any{"config": config, "referenceImages": refs, "metadata": metadata})
+		input := map[string]any{"config": config, "referenceImages": refs, "metadata": metadata}
+		if len(audios) > 0 {
+			input["referenceAudios"] = audios
+		}
+		task, err := r.createTaskWith(job, segmentVideoChoice(*segment, r.settings.Models.Video), "video", request.Operation, prompt, input)
 		return task, false, err
 	}
 	return nil, false, errors.New("剧情段没有对应分镜")
@@ -347,28 +438,58 @@ func (r *dramaRun) applySegmentVideo(job *model.DramaJob, task *model.Task) erro
 	if err := json.Unmarshal([]byte(job.PayloadJSON), &payload); err != nil {
 		return err
 	}
-	if err := r.s.repo.CreateDramaTake(&model.DramaTake{ID: newID(), ProjectID: r.project.ID, OwnerID: job.ShotID, Kind: "video", ResourceID: resourceID, TaskID: task.ID, Prompt: task.Prompt, DurationMs: int64(payload.Seconds) * 1000, CreatedAt: time.Now()}); err != nil {
-		return err
-	}
 	segment, err := r.s.repo.DramaSegment(r.project.ID, job.ShotID)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	current := err == nil && segment.Revision == payload.Revision
+	// 抽尾帧在后台进行，本函数每轮都会重入：段视频已是这条结果时说明版本记录与入库已经做过。
+	if !current || segment.VideoResourceID != resourceID {
+		if err := r.s.repo.CreateDramaTake(&model.DramaTake{ID: newID(), ProjectID: r.project.ID, OwnerID: job.ShotID, Kind: "video", ResourceID: resourceID, TaskID: task.ID, Prompt: task.Prompt, DurationMs: int64(payload.Seconds) * 1000, CreatedAt: time.Now()}); err != nil {
+			return err
+		}
+	}
+	if !current {
 		return nil
 	}
-	if err != nil {
-		return err
+	if segment.VideoResourceID != resourceID {
+		// Persist the paid output before local post-processing. Retrying only reopens this task's result.
+		// 换成新视频时清掉旧尾帧，旧尾帧不能当作新视频的最后一帧。
+		if _, err := r.s.repo.UpdateDramaSegmentRevision(segment.ID, payload.Revision, map[string]any{"video_resource_id": resourceID, "video_seconds": payload.Seconds, "tail_frame_resource_id": ""}); err != nil {
+			return err
+		}
+		segment.VideoResourceID, segment.TailFrameResourceID = resourceID, ""
 	}
-	if segment.Revision != payload.Revision {
-		return nil
+	if segment.TailFrameResourceID == "" {
+		if err := r.s.takeDramaTailFailure(resourceID); err != nil {
+			return err
+		}
+		s, userID, segmentID, revision := r.s, r.project.UserID, segment.ID, payload.Revision
+		s.startDramaTail(resourceID, func() error {
+			tail, err := s.extractDramaTailFrame(userID, resourceID)
+			if err != nil {
+				return err
+			}
+			_, err = s.repo.SetDramaSegmentTail(segmentID, revision, resourceID, tail)
+			return err
+		})
+		// 后台执行器可能已同步跑完（测试），或上一轮已抽好：重读一次，抽完就在本轮收尾。
+		if segment, err = r.s.repo.DramaSegment(r.project.ID, job.ShotID); errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if segment.Revision != payload.Revision || segment.VideoResourceID != resourceID {
+			return nil
+		}
+		if segment.TailFrameResourceID == "" {
+			if err := r.s.takeDramaTailFailure(resourceID); err != nil {
+				return err
+			}
+			return &dramaSyncDeferred{err: &dramaPendingTail{resourceID: resourceID}}
+		}
 	}
-	// Persist the paid output before local post-processing. Retrying only reopens this task's result.
-	if _, err := r.s.repo.UpdateDramaSegmentRevision(segment.ID, payload.Revision, map[string]any{"video_resource_id": resourceID, "video_seconds": payload.Seconds}); err != nil {
-		return err
-	}
-	tail, err := r.s.extractDramaTailFrame(r.project.UserID, resourceID)
-	if err != nil {
-		return err
-	}
-	_, err = r.s.repo.UpdateDramaSegmentRevision(segment.ID, payload.Revision, map[string]any{"video_status": model.DramaMediaReady, "tail_frame_resource_id": tail, "video_error": ""})
+	_, err = r.s.repo.UpdateDramaSegmentRevision(segment.ID, payload.Revision, map[string]any{"video_status": model.DramaMediaReady, "video_error": ""})
 	return err
 }
 

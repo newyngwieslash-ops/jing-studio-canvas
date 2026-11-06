@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { zhCN as accountZh } from "../src/i18n/messages/areas/account/zh-CN";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -34,9 +35,9 @@ describe("workspace sidebar checkin card", () => {
         expect(rule).toContain("box-shadow: none;");
     });
     test("sits above account storage and uses the claim card colors without a light-blue stage", () => {
-        const sidebar = readFileSync(resolve(import.meta.dir, "../src/components/layout/workspace-sidebar-nav.tsx"), "utf8");
-        const card = readFileSync(resolve(import.meta.dir, "../src/components/layout/workspace-sidebar-checkin.tsx"), "utf8");
-        const css = readFileSync(resolve(import.meta.dir, "../src/styles/globals.css"), "utf8");
+        const sidebar = readFileSync(resolve(import.meta.dir, "../src/components/layout/workspace-sidebar-nav.tsx"), "utf8").replace(/\r\n/g, "\n");
+        const card = readFileSync(resolve(import.meta.dir, "../src/components/layout/workspace-sidebar-checkin.tsx"), "utf8").replace(/\r\n/g, "\n");
+        const css = readFileSync(resolve(import.meta.dir, "../src/styles/globals.css"), "utf8").replace(/\r\n/g, "\n");
         const checkinIndex = sidebar.indexOf("<WorkspaceSidebarCheckin collapsed={collapsed} />");
         const storageIndex = sidebar.indexOf("<WorkspaceSidebarStorageMeter collapsed={collapsed} />");
         const start = css.indexOf(".app-user-workspace .app-workspace-sidebar-checkin {");
@@ -45,8 +46,10 @@ describe("workspace sidebar checkin card", () => {
 
         expect(checkinIndex).toBeGreaterThan(-1);
         expect(storageIndex).toBeGreaterThan(checkinIndex);
-        expect(card).toContain("立即领取");
-        expect(card).toContain("今日<em>{amount}</em>积分");
+        expect(card).toContain('t("account.layout.checkin.claim")');
+        expect(accountZh.layout.checkin.claim).toBe("立即领取");
+        expect(card).toContain('{t("account.layout.checkin.offerBefore")}\n                    <em>{amount}</em>\n                    {t("account.layout.checkin.offerAfter")}');
+        expect(accountZh.layout.checkin).toMatchObject({ offerBefore: "今日", offerAfter: "积分" });
         expect(card).toContain("checkinCredits()");
         expect(block).toContain("background: #fff;");
         expect(block).toContain("background: #171717;");

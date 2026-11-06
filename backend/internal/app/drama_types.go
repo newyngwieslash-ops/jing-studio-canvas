@@ -257,13 +257,31 @@ type CreateDramaRequest struct {
 	// SourceFormat 是素材类型：novel 小说、script 剧本、storyboard 分镜；剧本与分镜总是每章一集。
 	SourceFormat string `json:"sourceFormat"`
 	EpisodeMode  string `json:"episodeMode"`
+	// SelectedChapters 是先加入制作的章节下标（从 0 起，对应 Chapters）；为空表示全部章节。
+	// 没选中的章节原文照常保存为预留章节，不参与资产提取、分集与改编，之后可在制作台加入。
+	SelectedChapters []int `json:"selectedChapters"`
 }
 
-// AddDramaEpisodeRequest 在作品末尾追加一集：原文直接成为这一集，不经过分集规划。
+// ProduceDramaChaptersRequest 把预留的原著章节加入制作：按章节顺序每 ChaptersPerEpisode 章建成一集（不连续的章节不合并），
+// 追加在现有分集之后。ChaptersPerEpisode 为 0 时沿用作品的按章分集设置，没有设置按每章一集。
+type ProduceDramaChaptersRequest struct {
+	ChapterIDs         []string `json:"chapterIds"`
+	ChaptersPerEpisode int      `json:"chaptersPerEpisode"`
+}
+
+// ProduceDramaChaptersResult 是加入制作后新建的集，按集号排列。
+type ProduceDramaChaptersResult struct {
+	EpisodeIDs []string `json:"episodeIds"`
+}
+
+// AddDramaEpisodeRequest 新增一集：原文直接成为这一集，不经过分集规划。AnchorEpisodeID 为空时追加到末尾；
+// 否则按 Position（before / after）插到这一集之前或之后，后续集号顺延。
 type AddDramaEpisodeRequest struct {
-	Title        string `json:"title"`
-	Text         string `json:"text"`
-	SourceFormat string `json:"sourceFormat"`
+	Title           string `json:"title"`
+	Text            string `json:"text"`
+	SourceFormat    string `json:"sourceFormat"`
+	AnchorEpisodeID string `json:"anchorEpisodeId"`
+	Position        string `json:"position"`
 }
 
 // UpdateDramaChapterRequest 修改原文；已写好的剧本不会自动重写，需要用户点重新改编。
@@ -347,25 +365,33 @@ type DramaProductionView struct {
 	PauseReason        string        `json:"pauseReason"`
 	Settings           DramaSettings `json:"settings"`
 	BudgetMicrocredits int64         `json:"budgetMicrocredits"`
-	// SpentMicrocredits 是作品总花费：流水线任务加关联画布上的精修任务，预算按它判断。
+	// SpentMicrocredits 是作品已实际扣费的总额：流水线任务加关联画布上的精修任务，按订单结算实收计（退回不计）。
+	// CanvasSpentMicrocredits 是其中画布精修的部分；HeldMicrocredits 是尚未结算订单的冻结额（冻结中）。
+	// 预算按 SpentMicrocredits + HeldMicrocredits 保守判断。
 	SpentMicrocredits       int64  `json:"spentMicrocredits"`
 	CanvasSpentMicrocredits int64  `json:"canvasSpentMicrocredits"`
+	HeldMicrocredits        int64  `json:"heldMicrocredits"`
 	PlanDone                bool   `json:"planDone"`
 	PlanCursor              int    `json:"planCursor"`
 	SampleApproved          bool   `json:"sampleApproved"`
 	AssetsReleased          bool   `json:"assetsReleased"`
 	Logline                 string `json:"logline"`
 	Tone                    string `json:"tone"`
-	ChapterCount            int    `json:"chapterCount"`
-	WordCount               int    `json:"wordCount"`
+	// ChapterCount / WordCount 只统计已加入制作的章节；Reserved* 是导入时未选中、尚未加入制作的原著章节。
+	ChapterCount         int `json:"chapterCount"`
+	WordCount            int `json:"wordCount"`
+	ReservedChapterCount int `json:"reservedChapterCount"`
+	ReservedWordCount    int `json:"reservedWordCount"`
 }
 
 // DramaEpisodeStats 按剧情段统计进度：视频提示词写好几段、视频生成几段、失败几段。
+// VideoGenerated 是当前持有视频的段数（含已过期的旧视频），删除本集前据此要求输入确认。
 type DramaEpisodeStats struct {
-	Segments    int64 `json:"segments"`
-	PromptReady int64 `json:"promptReady"`
-	VideoReady  int64 `json:"videoReady"`
-	Failed      int64 `json:"failed"`
+	Segments       int64 `json:"segments"`
+	PromptReady    int64 `json:"promptReady"`
+	VideoReady     int64 `json:"videoReady"`
+	VideoGenerated int64 `json:"videoGenerated"`
+	Failed         int64 `json:"failed"`
 }
 
 type DramaEpisodeRow struct {
@@ -384,6 +410,9 @@ type DramaEpisodeRow struct {
 	FinalResourceID string            `json:"finalResourceId,omitempty"`
 	FinalStale      bool              `json:"finalStale"`
 	Stats           DramaEpisodeStats `json:"stats"`
+	// Revision / UpdatedAt 是集记录的版本与最后更新时间（RFC3339），用于判断读到的状态是否最新。
+	Revision  int64  `json:"revision"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 type DramaInboxItem struct {
@@ -418,6 +447,8 @@ type DramaJobView struct {
 	UpdatedAt        string `json:"updatedAt"`
 	// ProviderStage 是生成中任务的上游进度文案（如“候车 · 前面 3 条”），只在上游已接收任务时给出。
 	ProviderStage string `json:"providerStage,omitempty"`
+	// Wait 是排队作业还没提交的原因（作品暂停、账号同时任务已满、本池同时生成数已满）；下一轮就会提交时为空。
+	Wait string `json:"wait,omitempty"`
 }
 
 // DramaJobAttempt 是工作的一次提交记录；status 为任务状态，或 rejected（提交时被准入拒绝）。
@@ -474,6 +505,9 @@ type DramaChapterRef struct {
 	Title     string `json:"title"`
 	Position  int    `json:"position"`
 	WordCount int    `json:"wordCount"`
+	// Reserved 表示原著章节尚未加入制作；EpisodeNumber 是使用这一章的第一集（未分到集时为 0）。只在章节目录里给出。
+	Reserved      bool `json:"reserved,omitempty"`
+	EpisodeNumber int  `json:"episodeNumber,omitempty"`
 }
 
 type DramaEpisodeDetail struct {
@@ -491,8 +525,9 @@ type DramaEpisodeDetail struct {
 // DramaSegmentView 是一个剧情段：视频提示词、参考图、生成方式与视频结果。
 type DramaSegmentView struct {
 	ID string `json:"id"`
-	// Revision 用于画布采用时的乐观并发校验。
+	// Revision 用于画布采用时的乐观并发校验；UpdatedAt 是段记录最后更新时间（RFC3339），段还没有记录时为空。
 	Revision   int64    `json:"revision"`
+	UpdatedAt  string   `json:"updatedAt,omitempty"`
 	Index      int      `json:"index"`
 	Title      string   `json:"title"`
 	ShotIDs    []string `json:"shotIds"`
@@ -554,6 +589,20 @@ type DramaSegmentRequest struct {
 	Warning string `json:"warning,omitempty"`
 	// UnknownReferences 是提示词正文里不属于本段的“参考图N”（编号超出本段参考图数量），存在时不能提交视频。
 	UnknownReferences []string `json:"unknownReferences,omitempty"`
+	// AudioReferences 是本段说话、且指定了声音样本的角色（按开口顺序）；Sent 的作为“参考音频N”随请求发送。
+	// ModelMaxAudios 是视频模型声明的参考音频上限，0 表示不支持参考音频。
+	AudioReferences []DramaSegmentAudioReference `json:"audioReferences"`
+	ModelMaxAudios  int                          `json:"modelMaxAudios,omitempty"`
+}
+
+// DramaSegmentAudioReference 是一个说话角色的声音样本；没有随请求发送时 Note 说明原因，本段按声线描述生成该角色的对白。
+type DramaSegmentAudioReference struct {
+	CastID     string `json:"castId"`
+	Name       string `json:"name"`
+	Label      string `json:"label,omitempty"`
+	ResourceID string `json:"resourceId"`
+	Sent       bool   `json:"sent"`
+	Note       string `json:"note,omitempty"`
 }
 
 type DramaSegmentReference struct {
@@ -588,6 +637,25 @@ type UpdateDramaShotRequest struct {
 	DurationSeconds *float64 `json:"durationSeconds"`
 }
 
+// SetDramaCastVoiceRequest 为角色指定声音：VoiceProfileID 从声音库选，SampleResourceID 是刚上传或录制的样本音频
+// （按 VoiceName 登记到声音库，同一样本重复使用同一条）。RestyleSegments 让引用该角色的剧情段视频重新生成。
+type SetDramaCastVoiceRequest struct {
+	VoiceProfileID   string `json:"voiceProfileId"`
+	SampleResourceID string `json:"sampleResourceId"`
+	VoiceName        string `json:"voiceName"`
+	RestyleSegments  bool   `json:"restyleSegments"`
+}
+
+// DramaCastLookRequest 新增或修改一套角色造型：LookName 造型名，Appearance 这套造型的外观，
+// FromChapter / ToChapter 默认适用的原著章节号（从 1 起，0 或 nil 表示该端不限）。
+type DramaCastLookRequest struct {
+	LookName        string `json:"lookName"`
+	Appearance      string `json:"appearance"`
+	FromChapter     *int   `json:"fromChapter"`
+	ToChapter       *int   `json:"toChapter"`
+	RestyleSegments bool   `json:"restyleSegments"`
+}
+
 type UpdateDramaCastRequest struct {
 	Name              *string   `json:"name"`
 	Aliases           *[]string `json:"aliases"`
@@ -610,7 +678,9 @@ type DramaListItem struct {
 	AspectRatio       string   `json:"aspectRatio"`
 	StyleName         string   `json:"styleName,omitempty"`
 	SpentMicrocredits int64    `json:"spentMicrocredits"`
-	UpdatedAt         string   `json:"updatedAt"`
+	// HeldMicrocredits 是尚未结算订单的冻结额，口径同 DramaProductionView。
+	HeldMicrocredits int64  `json:"heldMicrocredits"`
+	UpdatedAt        string `json:"updatedAt"`
 }
 
 type DramaModelOption struct {

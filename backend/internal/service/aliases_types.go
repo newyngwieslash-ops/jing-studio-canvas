@@ -11,6 +11,16 @@ const (
 )
 
 type (
+	SaveEcommerceProjectRequest            = app.SaveEcommerceProjectRequest
+	EcommerceCreativeDirectionsRequest     = app.EcommerceCreativeDirectionsRequest
+	EcommerceStyleChoice                   = app.EcommerceStyleChoice
+	EcommerceAgentSetting                  = app.EcommerceAgentSetting
+	EcommerceOrchestrationSetting          = app.EcommerceOrchestrationSetting
+	EcommerceCreativeDirection             = app.EcommerceCreativeDirection
+	EcommerceCreativeDirectionsResponse    = app.EcommerceCreativeDirectionsResponse
+	EcommerceCreativeDirectionSelection    = app.EcommerceCreativeDirectionSelection
+	EcommerceKnowledgeEvidence             = app.EcommerceKnowledgeEvidence
+	DeleteEcommerceProjectsRequest         = app.DeleteEcommerceProjectsRequest
 	BindProjectAssetImageRequest           = app.BindProjectAssetImageRequest
 	PaymentOrderQuery                      = app.PaymentOrderQuery
 	PaymentReconciliationQuery             = app.PaymentReconciliationQuery
@@ -91,6 +101,11 @@ type (
 	AppearanceSkinModeTokens               = app.AppearanceSkinModeTokens
 	AppearanceSkinTheme                    = app.AppearanceSkinTheme
 	AppearanceSkinTokens                   = app.AppearanceSkinTokens
+	AdminArkGroupCreateRequest             = app.AdminArkGroupCreateRequest
+	AdminArkGroupQuery                     = app.AdminArkGroupQuery
+	AdminArkGroupUpdateRequest             = app.AdminArkGroupUpdateRequest
+	ArkAssetUploadInput                    = app.ArkAssetUploadInput
+	ArkGroupInput                          = app.ArkGroupInput
 	ArkPrivateAssetSettingRequest          = app.ArkPrivateAssetSettingRequest
 	ArkPrivateAssetSyncResult              = app.ArkPrivateAssetSyncResult
 	AssetCandidateInput                    = app.AssetCandidateInput
@@ -298,6 +313,11 @@ type (
 	RuntimeResourcePolicy                  = app.RuntimeResourcePolicy
 	RuntimeTaskPolicy                      = app.RuntimeTaskPolicy
 	Service                                = app.Service
+	AdminSkillListRequest                  = app.AdminSkillListRequest
+	AdminSkillItem                         = app.AdminSkillItem
+	AdminSkillList                         = app.AdminSkillList
+	AdminSkillInfoRequest                  = app.AdminSkillInfoRequest
+	AdminSkillPackageEditResult            = app.AdminSkillPackageEditResult
 	ShotRevisionInput                      = app.ShotRevisionInput
 	SkillCategory                          = app.SkillCategory
 	SkillLibraryCategory                   = app.SkillLibraryCategory

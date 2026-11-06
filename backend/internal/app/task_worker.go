@@ -93,6 +93,7 @@ func (w *taskWorkerCoordinator) start(ctx context.Context) {
 					if err := w.processClaimedTask(task, globalSlot); err != nil {
 						_ = s.log(task.UserID, task.ID, "error", "后台任务处理失败", err.Error())
 					}
+					s.wakeDramaAfterTask(task.ID, task.InputJSON)
 				})
 				if !started {
 					<-slots
@@ -204,6 +205,28 @@ func (w *taskWorkerCoordinator) processClaimedTask(task *model.Task, globalSlot 
 	if err := json.Unmarshal([]byte(decryptedInput), &admissionInput); err != nil {
 		return err
 	}
+	if task.ProviderRequestID == "" && task.PollStage != "accepted" && task.PollStage != "poll" {
+		if featureErr := s.requireTaskGenerationFeatures(task.UserID, task.ProjectID, task.Type, task.Operation, task.WorkbenchKind, admissionInput); featureErr != nil {
+			attempts, readErr := s.repo.RouteAttempts(task.ID, task.RouteRun)
+			if readErr != nil {
+				return readErr
+			}
+			submitted := false
+			for _, attempt := range attempts {
+				if attempt.DispatchState == "accepted" || attempt.DispatchState == "submission_unknown" {
+					submitted = true
+				}
+			}
+			// Submitted work keeps its original polling and result-persistence path.
+			if !submitted {
+				uncertain := s.taskBilling().BillingFailureRequiresReview(task.BillingOrderID, task.ID, featureErr)
+				if len(attempts) == 0 && task.RouteRun <= 1 && task.Attempts > 1 {
+					uncertain = true
+				}
+				return terminal.markPreparationFailure(task, "功能暂未开放", featureErr, uncertain, "功能已关闭，上游请求未发出")
+			}
+		}
+	}
 	if err := s.requireCustomChannelsForTaskInput(admissionInput); err != nil {
 		// A reclaimed task may already have submitted upstream. Keep the existing
 		// review path for that evidence; only an unsent reservation is refundable.
@@ -247,7 +270,11 @@ func (w *taskWorkerCoordinator) processClaimedTask(task *model.Task, globalSlot 
 		return terminal.markPreparationFailure(task, "路由准备失败", err, isRouteDispatchUncertain(err), "路由准备失败，上游请求未发出")
 	}
 	if err := s.taskBilling().MarkBillingRunning(task.BillingOrderID); err != nil {
-		return terminal.markPreparationFailure(task, "计费准备失败", err, false, "计费准备失败，上游请求未发出")
+		uncertain := task.ProviderRequestID != "" || s.taskBilling().BillingFailureRequiresReview(task.BillingOrderID, task.ID, err)
+		if routeAttempt != nil && (routeAttempt.DispatchState == "accepted" || routeAttempt.DispatchState == "submission_unknown") {
+			uncertain = true
+		}
+		return terminal.markPreparationFailure(task, "计费准备失败", err, uncertain, "计费准备失败，上游请求未发出")
 	}
 	routeResult, stateErr := s.routeExecutor().execute(ctx, task, routeAttempt)
 	if stateErr != nil {
@@ -461,7 +488,8 @@ func (s *Service) shouldDeferProviderTask(task model.Task, decryptedInput string
 		return false
 	}
 	if isVideoTaskType(task.Type) || input.Mode == "video" {
-		return resolved.InterfaceType == string(model.ChannelInterfaceNewAPIChannel2)
+		// 总等待时长与分离式回查共用上限，上游丢单时不会无限回查。
+		return s.videoProviderSupportsTaskResume(resolved.InterfaceType) && (task.StartedAt == nil || time.Since(*task.StartedAt) < detachedProviderTaskMaxAge)
 	}
 	if input.Mode != "image" && !strings.HasPrefix(task.Type, "canvas_image") {
 		return false
@@ -488,8 +516,25 @@ func (s *Service) imageProviderSupportsTaskResume(interfaceType string) bool {
 	if isVolcengineJiMengProtocol(interfaceType) || isRunningHubInterface(interfaceType) {
 		return true
 	}
-	metadata, ok := s.protocolMetadata(interfaceType)
+	return s.protocolSupportsTaskResume(interfaceType)
+}
+
+// protocolSupportsTaskResume 判断协议是否声明了按上游任务 ID 回查的 poll 操作。
+func (s *Service) protocolSupportsTaskResume(interfaceType string) bool {
+	metadata, ok := s.protocolMetadata(strings.TrimSpace(interfaceType))
 	return ok && strings.TrimSpace(metadata.Poll) != ""
+}
+
+// videoProviderSupportsTaskResume 决定视频任务超过单次执行时限后能否继续回查原任务。
+// 声明式插件带着上游任务 ID 恢复时只走 poll、不会再次 create（见 runProtocolAdapterTaskWithPolicy），
+// 所以声明了 poll 即可续查；手写协议只保留已核实只读回查的 NewAPI Channel 2。
+func (s *Service) videoProviderSupportsTaskResume(interfaceType string) bool {
+	interfaceType = strings.TrimSpace(interfaceType)
+	metadata, ok := s.protocolMetadata(interfaceType)
+	if ok && metadata.Execution == "declarative" && strings.TrimSpace(metadata.Poll) != "" {
+		return true
+	}
+	return interfaceType == string(model.ChannelInterfaceNewAPIChannel2)
 }
 
 func newAPIChannel2TaskSyncExpired(task model.Task, err error, now time.Time) bool {

@@ -279,7 +279,13 @@ func (s *Service) ValidateTaskCapability(input map[string]any) error {
 		return BadAuthRequest("任务输入格式无效")
 	}
 	var taskInput canvasGenerationInput
-	if err := json.Unmarshal(encoded, &taskInput); err != nil || (taskInput.Mode != "image" && taskInput.Mode != "video" && taskInput.Mode != "audio") {
+	if err := json.Unmarshal(encoded, &taskInput); err != nil {
+		return nil
+	}
+	if taskInput.Mode == "text" {
+		return s.validateTextTaskReferences(taskInput)
+	}
+	if taskInput.Mode != "image" && taskInput.Mode != "video" && taskInput.Mode != "audio" {
 		return nil
 	}
 	if isWorkflowProviderInterface(taskInput.Config.InterfaceType) {
@@ -372,6 +378,62 @@ func (s *Service) ValidateTaskCapability(input map[string]any) error {
 	return validateVideoTask(normalized.Video, taskInput)
 }
 
+// validateTextTaskReferences 在预授权扣费前拦下发给不支持看图 / 视频识别的文字模型的参考素材；放行后上游只会返回 400。
+// 系统渠道按渠道模型的能力合同判断，未声明文字能力视为不支持图片和视频（与看图工具同一口径）；
+// 自定义渠道只在请求附带了文字能力配置时判断，未附带时不推断。
+// 视频识别默认关闭：管理员在模型能力里勾选「支持视频识别」（maxVideos > 0）后才放行参考视频。
+func (s *Service) validateTextTaskReferences(input canvasGenerationInput) error {
+	if (len(input.ReferenceImages) == 0 && len(input.ReferenceVideos) == 0) || isWorkflowProviderInterface(input.Config.InterfaceType) {
+		return nil
+	}
+	channelID := strings.TrimSpace(input.Config.ChannelID)
+	if channelID == "" {
+		channelID = systemChannelIDFromBaseURL(input.Config.BaseURL)
+	}
+	if channelID == "" {
+		if profile := input.Config.CapabilityConfig; profile != nil && profile.Text != nil {
+			return validateTextReferenceLimits(profile.Text.References, input)
+		}
+		return nil
+	}
+	if s == nil || s.repo == nil {
+		return BadAuthRequest("当前系统渠道模型未配置或已停用")
+	}
+	item, err := s.repo.ChannelModelByKey(channelID, providerChannelModelKey(input.Config))
+	if err != nil || item == nil {
+		return BadAuthRequest("当前系统渠道模型未配置或已停用")
+	}
+	profile, err := DecodeModelCapabilityConfig(item.CapabilityConfigJSON)
+	if err != nil {
+		return BadAuthRequest("当前文字模型能力参数无效")
+	}
+	if profile == nil || profile.Text == nil {
+		return validateTextReferenceLimits(TextReferenceConfig{}, input)
+	}
+	return validateTextReferenceLimits(profile.Text.References, input)
+}
+
+func validateTextReferenceLimits(references TextReferenceConfig, input canvasGenerationInput) error {
+	if len(input.ReferenceImages) > 0 && references.MaxImages <= 0 {
+		return newModelCapabilityArgumentError("referenceNodeIds", "unsupported_value", BadAuthRequest("当前文字模型不支持图片输入，请选择支持看图的文字模型"))
+	}
+	if len(input.ReferenceVideos) == 0 {
+		return nil
+	}
+	if references.MaxVideos <= 0 {
+		return newModelCapabilityArgumentError("referenceNodeIds", "unsupported_value", BadAuthRequest("当前文字模型未开启视频识别，请选择支持视频识别的文字模型"))
+	}
+	if len(input.ReferenceVideos) > references.MaxVideos {
+		return newModelCapabilityArgumentError("referenceNodeIds", "item_count", BadAuthRequest(fmt.Sprintf("当前文字模型最多识别 %d 个参考视频", references.MaxVideos)))
+	}
+	for _, media := range input.ReferenceVideos {
+		if references.MaxVideoBytes > 0 && media.Bytes > references.MaxVideoBytes {
+			return newModelCapabilityArgumentError("referenceNodeIds", "unsupported_value", BadAuthRequest("参考视频文件超过当前文字模型大小限制"))
+		}
+	}
+	return nil
+}
+
 // applyModelSpecificImageCapability is retained as a narrow normalization hook
 // for provider-specific image validation. The stored capability profile is
 // already normalized when the channel model is saved, so no second override is
@@ -428,8 +490,11 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 		}
 	}
 	seconds, err := strconv.Atoi(strings.TrimSpace(input.Config.VideoSeconds))
-	if err != nil || !videoDurationAllowed(profile.Duration, seconds) {
-		return newModelCapabilityArgumentError("durationSeconds", "unsupported_value", BadAuthRequest("视频时长不在当前模型支持范围内"))
+	if err != nil {
+		return newModelCapabilityArgumentError("durationSeconds", "unsupported_value", BadAuthRequest(fmt.Sprintf("视频时长不在当前模型支持范围内（%s）", videoDurationAllowedLabel(profile.Duration))))
+	}
+	if !videoDurationAllowed(profile.Duration, seconds) {
+		return newModelCapabilityArgumentError("durationSeconds", "unsupported_value", BadAuthRequest(fmt.Sprintf("视频时长 %d 秒不在当前模型支持范围内（%s）", seconds, videoDurationAllowedLabel(profile.Duration))))
 	}
 	if input.Config.Size != "" && !videoRatioAllowed(profile.Ratios, input.Config.Size) {
 		return newModelCapabilityArgumentError("size", "unsupported_value", BadAuthRequest("画面比例不在当前模型支持范围内"))
@@ -1014,6 +1079,57 @@ func videoDurationAllowed(value VideoDurationConfig, seconds int) bool {
 		return containsInt(value.Values, seconds)
 	}
 	return seconds >= value.Min && seconds <= value.Max && value.Step > 0 && (seconds-value.Min)%value.Step == 0
+}
+
+// videoDurationSpan 把可选时长归成等差区间：范围声明直接取上下限与步长；多于 3 档的等差枚举也按区间描述，
+// 避免在提示里列出几十个档位。归不成区间时 ok 为 false，list 是从小到大的档位文本。
+func videoDurationSpan(value VideoDurationConfig) (low, high, step int, list string, ok bool) {
+	if value.Selection != "enum" {
+		return value.Min, value.Max, value.Step, "", true
+	}
+	values := append([]int(nil), value.Values...)
+	sort.Ints(values)
+	labels := make([]string, 0, len(values))
+	for _, item := range values {
+		labels = append(labels, strconv.Itoa(item))
+	}
+	list = strings.Join(labels, "、")
+	if len(values) <= 3 {
+		return 0, 0, 0, list, false
+	}
+	step = values[1] - values[0]
+	for index := 2; index < len(values); index++ {
+		if values[index]-values[index-1] != step {
+			return 0, 0, 0, list, false
+		}
+	}
+	return values[0], values[len(values)-1], step, list, step > 0
+}
+
+// videoDurationAllowedLabel 用与 videoDurationAllowed 相同的口径描述可选时长，例如“5–30 秒，步长 1”“可选 5、10 秒”。
+func videoDurationAllowedLabel(value VideoDurationConfig) string {
+	low, high, step, list, ok := videoDurationSpan(value)
+	switch {
+	case !ok:
+		return "可选 " + list + " 秒"
+	case value.Selection != "enum":
+		return fmt.Sprintf("%d–%d 秒，步长 %d", low, high, step)
+	case step == 1:
+		return fmt.Sprintf("可选 %d–%d 秒", low, high)
+	}
+	return fmt.Sprintf("可选 %d–%d 秒，步长 %d", low, high, step)
+}
+
+// videoDurationSupportLabel 是写进业务提示的简短版本，例如“5–30 秒”“5、10 秒”。
+func videoDurationSupportLabel(value VideoDurationConfig) string {
+	low, high, step, list, ok := videoDurationSpan(value)
+	switch {
+	case !ok:
+		return list + " 秒"
+	case step > 1:
+		return fmt.Sprintf("%d–%d 秒（步长 %d）", low, high, step)
+	}
+	return fmt.Sprintf("%d–%d 秒", low, high)
 }
 
 func videoRatioAllowed(options []string, value string) bool {

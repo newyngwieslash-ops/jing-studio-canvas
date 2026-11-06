@@ -9,6 +9,8 @@ type (
 	UpdateDramaSegmentRequest     = app.UpdateDramaSegmentRequest
 	DramaSegmentView              = app.DramaSegmentView
 	UpdateDramaCastRequest        = app.UpdateDramaCastRequest
+	SetDramaCastVoiceRequest      = app.SetDramaCastVoiceRequest
+	DramaCastLookRequest          = app.DramaCastLookRequest
 	DramaEstimateRequest          = app.DramaEstimateRequest
 	GenerateDramaSegmentsRequest  = app.GenerateDramaSegmentsRequest
 	DramaListRequest              = app.DramaListRequest
@@ -16,9 +18,13 @@ type (
 	ReleaseDramaMediaRequest      = app.ReleaseDramaMediaRequest
 	AddDramaEpisodeRequest        = app.AddDramaEpisodeRequest
 	UpdateDramaChapterRequest     = app.UpdateDramaChapterRequest
+	ProduceDramaChaptersRequest   = app.ProduceDramaChaptersRequest
 	UpdateDramaEpisodeRequest     = app.UpdateDramaEpisodeRequest
 	InsertDramaShotRequest        = app.InsertDramaShotRequest
 	SetDramaCastImageRequest      = app.SetDramaCastImageRequest
 	AdoptDramaSegmentVideoRequest = app.AdoptDramaSegmentVideoRequest
 	DramaCanvasAssetsRequest      = app.DramaCanvasAssetsRequest
+	DramaArchive                  = app.DramaArchive
+	DramaJianyingDraftRequest     = app.DramaJianyingDraftRequest
+	DramaAssetPackageRequest      = app.DramaAssetPackageRequest
 )

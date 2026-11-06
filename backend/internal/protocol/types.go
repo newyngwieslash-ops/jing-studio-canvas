@@ -180,6 +180,7 @@ type Metadata struct {
 	Parameters              []Parameter      `json:"parameters,omitempty"`
 	ImageParameters         []ImageParameter `json:"imageParameters,omitempty"`
 	Create                  string           `json:"-"`
+	Agent                   string           `json:"-"`
 	Poll                    string           `json:"-"`
 	Cancel                  string           `json:"-"`
 	ContentType             string           `json:"-"`
@@ -196,6 +197,12 @@ type Metadata struct {
 	UnavailableReason string `json:"-"`
 	// Kind 区分生成类与处理类 provider；处理类以输入媒体为主体，不要求 prompt。
 	Kind ProviderKind `json:"kind,omitempty"`
+	// TextWire / AgentWire 是 create / agent 声明路径对应的宿主已知文本线格式（见 textwire.go），
+	// 只对文本 provider 计算；为空表示请求和响应完全按插件自己的映射处理。
+	TextWire  string `json:"-"`
+	AgentWire string `json:"-"`
+	// Auth 是插件声明的鉴权方式，只包含字段名和请求头写法，不含任何密钥值。
+	Auth ManifestAuth `json:"-"`
 }
 
 // ProviderKind 描述 provider 的业务形态。空值等同 generation。
@@ -341,6 +348,16 @@ type ManifestPaymentProvider struct {
 	IdentityFields      []string                    `json:"identityFields,omitempty"`
 	NotificationSuccess ManifestPaymentResponse     `json:"notificationSuccess,omitempty"`
 	NotificationFailure ManifestPaymentResponse     `json:"notificationFailure,omitempty"`
+	// Methods 是渠道内可选支付方式的目录（名称和图标）。MethodsField 指向保存已启用方式的配置字段，
+	// 值为逗号分隔的方式 ID，可写成 id:名称 增加目录外的方式；为空时目录中的方式全部启用。
+	Methods      []ManifestPaymentMethod `json:"methods,omitempty"`
+	MethodsField string                  `json:"methodsField,omitempty"`
+}
+
+type ManifestPaymentMethod struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Icon  string `json:"icon,omitempty"`
 }
 
 type ManifestPaymentExpiryPolicy struct {

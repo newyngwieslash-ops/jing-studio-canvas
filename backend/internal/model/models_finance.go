@@ -64,16 +64,24 @@ type BillingOrder struct {
 	ReservedAmountMicrocredits int64  `json:"reservedAmountMicrocredits"`
 	// ChargeLimitSet distinguishes an authorized zero price from an uncapped order.
 	// All Agent prices remain capped across route changes and settlement.
-	ChargeLimitSet               bool  `json:"chargeLimitSet,omitempty" gorm:"not null;default:false"`
-	ChargeLimitMicrocredits      int64 `json:"chargeLimitMicrocredits,omitempty"`
-	ActualAmountMicrocredits     int64 `json:"actualAmountMicrocredits"`
-	RefundedAmountMicrocredits   int64 `json:"refundedAmountMicrocredits"`
-	InputTokenPriceMicrocredits  int64 `json:"inputTokenPriceMicrocredits"`
-	OutputTokenPriceMicrocredits int64 `json:"outputTokenPriceMicrocredits"`
-	CachedTokenPriceMicrocredits int64 `json:"cachedTokenPriceMicrocredits"`
-	InputTokens                  int64 `json:"inputTokens"`
-	OutputTokens                 int64 `json:"outputTokens"`
-	CachedTokens                 int64 `json:"cachedTokens"`
+	ChargeLimitSet                   bool  `json:"chargeLimitSet,omitempty" gorm:"not null;default:false"`
+	ChargeLimitMicrocredits          int64 `json:"chargeLimitMicrocredits,omitempty"`
+	ActualAmountMicrocredits         int64 `json:"actualAmountMicrocredits"`
+	RefundedAmountMicrocredits       int64 `json:"refundedAmountMicrocredits"`
+	InputTokenPriceMicrocredits      int64 `json:"inputTokenPriceMicrocredits"`
+	OutputTokenPriceMicrocredits     int64 `json:"outputTokenPriceMicrocredits"`
+	CachedTokenPriceMicrocredits     int64 `json:"cachedTokenPriceMicrocredits"`
+	CacheWriteTokenPriceMicrocredits int64 `json:"cacheWriteTokenPriceMicrocredits" gorm:"not null;default:0"`
+	// TokenPriceRulesJSON 固化下单时所在时段（东八区）启用的分时与上下文规则（[]BillingTokenPriceRule），
+	// 单价已换算为微积分；结算按真实输入 Token 取首条命中的规则，未命中时用上面的基础 Token 单价。
+	TokenPriceRulesJSON string `json:"-" gorm:"type:text;not null;default:''"`
+	// TokenPriceRule 是结算命中的规则序号（从 1 起），0 表示按基础 Token 单价结算。
+	TokenPriceRule int `json:"tokenPriceRule" gorm:"not null;default:0"`
+	// InputTokens 含缓存命中与缓存写入；结算时普通输入 = InputTokens - CachedTokens - CacheWriteTokens。
+	InputTokens      int64 `json:"inputTokens"`
+	OutputTokens     int64 `json:"outputTokens"`
+	CachedTokens     int64 `json:"cachedTokens"`
+	CacheWriteTokens int64 `json:"cacheWriteTokens" gorm:"not null;default:0"`
 	// VideoFormulaTokens 固化提交时的视频公式用量，不含预授权余量；旧订单保持 0，不反推历史用量。
 	VideoFormulaTokens int64         `json:"videoFormulaTokens" gorm:"not null;default:0"`
 	UsageSource        string        `json:"usageSource,omitempty" gorm:"size:32;not null;default:''"`

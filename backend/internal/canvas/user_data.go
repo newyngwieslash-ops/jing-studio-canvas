@@ -100,6 +100,10 @@ func (s *Service) UpsertUserAsset(userID string, raw json.RawMessage) (UserDataS
 		if existingErr != nil && !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 			return existingErr
 		}
+		// 方舟认证分类只由服务端写入认证结果时设置；客户端只能保留已在该分类的素材。
+		if asset.Category == model.AssetCategoryArk && (existing == nil || existing.Category != model.AssetCategoryArk) {
+			return kernel.BadAuthRequest("方舟认证分类由认证结果自动设置，不能手动选择")
+		}
 		if existing != nil && existing.PayloadJSON != asset.PayloadJSON {
 			if err := s.ValidateAssetCanvasReferences(userID, asset); err != nil {
 				return err
@@ -364,6 +368,12 @@ func (s *Service) ApplyUserCanvasOperations(userID, canvasID string, req CanvasO
 				return err
 			}
 			if !req.TrustedServerMutation {
+				if existing != nil {
+					raw, err = New(tx, nil).repairPurgedCanvasMediaReferences(userID, json.RawMessage(existing.PayloadJSON), raw)
+					if err != nil {
+						return err
+					}
+				}
 				if err := New(tx, nil).ValidateCanvasMediaAssets(userID, raw); err != nil {
 					return err
 				}

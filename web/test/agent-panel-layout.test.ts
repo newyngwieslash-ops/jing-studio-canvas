@@ -12,14 +12,19 @@ describe("Agent window layout", () => {
     it("restores the saved size and position", () => {
         expect(restoreAgentPanelLayout(JSON.stringify(start), viewport)).toEqual(start);
     });
-    it("starts within the visible viewport instead of an invisible 840px height", () => {
+    it("fills the height below the top bar by default", () => {
         const layout = restoreAgentPanelLayout(null, { width: 1024, height: 650 });
-        expect(layout.height).toBe(626);
-        expect(layout.top).toBe(12);
+        expect(layout.height).toBe(566);
+        expect(layout.top).toBe(72);
+    });
+    it("keeps the minimum readable height on very short viewports", () => {
+        const layout = restoreAgentPanelLayout(null, { width: 1024, height: 480 });
+        expect(layout.height).toBe(420);
+        expect(layout.top + layout.height).toBe(468);
     });
     it("offers a compact reset without altering a saved window until requested", () => {
         expect(restoreAgentPanelLayout(JSON.stringify(start), viewport)).toEqual(start);
-        expect(defaultAgentPanelLayout(viewport)).toEqual({ left: 848, top: 148, width: 420, height: 640 });
+        expect(defaultAgentPanelLayout(viewport)).toEqual({ left: 848, top: 72, width: 420, height: 716 });
     });
     it("keeps the bottom/right anchor when resizing from top/left", () => {
         const layout = changeAgentPanelLayout(start, "northwest", -120, 60, viewport);
@@ -60,7 +65,9 @@ describe("Agent submission sync preflight contract", () => {
         expect(source).toContain('if (decision === "approve" && run.canvasId) {');
         expect(source).toContain("await prepareCanvasForCloudAction(run.canvasId);");
         expect(source).not.toContain("cloudNodeIds");
-        expect(source).toContain("submitDisabled={otherAgentRunning");
+        // 发送新一轮时画布占用会禁用按钮；排队只写本机，不受占用影响。
+        expect(source).toContain('composerSubmitMode === "send"\n            ? (otherAgentRunning && !pendingNow?.request)');
+        expect(source).toContain("submitDisabled={composerSubmitDisabled}");
         expect(source).toContain("重新读取记录");
         expect(source).toContain("requestSent = true;\n            const result = submission.parentRunId ? await sendAgentMessage");
         expect(source).toContain("agentSubmissionErrorTitle(cause, accepted, requestSent)");

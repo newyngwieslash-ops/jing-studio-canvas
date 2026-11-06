@@ -19,6 +19,7 @@ export type AgentFeedRecord = {
     detail?: unknown;
     planItems?: readonly unknown[];
     question?: unknown;
+    mediaBatch?: unknown;
 };
 
 export type AgentFeedSegment<T> = { kind: "operations"; key: string; items: T[] } | { kind: "reasoning"; key: string; items: T[] } | { kind: "message"; key: string; item: T };
@@ -34,7 +35,8 @@ function record(value: unknown): Record<string, unknown> {
  */
 export function isAgentCarrierRecord(item: AgentFeedRecord): boolean {
     if (item.role === "user" || item.text || item.title) return false;
-    return Boolean(item.planItems?.length) || Boolean(item.question);
+    // 批量生成进度同理：由输入区上方的批次进度条渲染。
+    return Boolean(item.planItems?.length) || Boolean(item.question) || Boolean(item.mediaBatch);
 }
 
 /** 等用户确认的工具调用（审批卡）必须留在消息流里，不能被折进"操作记录"里藏起来。 */
@@ -56,7 +58,7 @@ export function agentOperationLabel(item: AgentFeedRecord): string {
     return friendlyAgentToolSummary(name, item.text, item.detail, agentToolStatus(name, item.text, item.detail) === "pending");
 }
 
-/** 失败/被拒的操作默认展开：错误不该被折进一行里看不见。 */
+/** 失败/被拒的操作在摘要中明确标记，详情仍由用户展开。 */
 export function agentOperationFailed(item: AgentFeedRecord): boolean {
     const status = agentToolStatus(agentToolName(item.title || "工具执行", item.detail), item.text, item.detail);
     return status === "failed" || status === "rejected";

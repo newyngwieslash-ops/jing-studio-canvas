@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { App, Button, Input, InputNumber, Select } from "antd";
 import { AntTooltip as Tooltip } from "@/components/ui/base/tooltip/ant-tooltip";
-import { AlertTriangle, ArrowLeft, Brush, Check, ChevronLeft, ChevronRight, Copy, Info, Loader2, Pencil, Play, Plus, RotateCcw, Trash2, X, PenLine } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Brush, Check, ChevronLeft, ChevronRight, Copy, Info, Loader2, Mic, Pencil, Play, Plus, RotateCcw, Trash2, X, PenLine } from "lucide-react";
 
 import { AppModal } from "@/components/ui/product/app-modal";
 import { TRANSITION_LABEL } from "@/lib/drama/storyboard";
 import type { DramaCast, DramaEpisodeDetail, DramaModelChoice, DramaSegment, DramaShot, DramaShotPatch, DramaTransition } from "@/services/api/drama";
 import { dramaChoiceKey } from "@/lib/drama/model-choice";
 
-import { DramaModelPicker } from "../drama-model-picker";
+import { DramaModelPicker, useDramaModelCatalog } from "../drama-model-picker";
+import { useEffectiveConfig } from "@/stores/use-config-store";
+import { useUserStore } from "@/stores/use-user-store";
+import { dramaSegmentQuoteMissing, dramaSegmentVideoRequirements, dramaVideoOptionFor, SEGMENT_NO_QUOTE_HINT } from "./segment-quote";
 
 import { CAST_KIND_LABEL, formatCredits, mediaBusy, MediaThumb, parseList } from "../drama-shared";
 import { promptReady, referenceMissingReason, secondsLabel, SegmentStatus, SegmentVideo, videoWaitLabel } from "./segment-parts";
@@ -214,7 +217,7 @@ export function SegmentDialog({
                                     <dd>{segment.videoSeconds ? `${segment.videoSeconds} 秒` : "—"}</dd>
                                 </div>
                                 <div>
-                                    <dt>本段花费</dt>
+                                    <dt>上次花费</dt>
                                     <dd>{segment.videoJob ? `${formatCredits(segment.videoJob.costMicrocredits)} 积分` : "—"}</dd>
                                 </div>
                             </dl>
@@ -251,6 +254,10 @@ function SegmentToolbar({
     const baseline = segment.videoModel?.logicalModelId || segment.videoModel?.modelKey ? segment.videoModel : defaultVideoModel;
     const [choice, setChoice] = useState<DramaModelChoice>(baseline);
     const changed = dramaChoiceKey(choice) !== dramaChoiceKey(baseline);
+    const config = useEffectiveConfig();
+    const creditsEnabled = useUserStore((state) => state.features.creditsEnabled);
+    const catalogQuery = useDramaModelCatalog();
+    const quoteMissing = creditsEnabled && dramaSegmentQuoteMissing(config, choice, dramaSegmentVideoRequirements(segment.request, dramaVideoOptionFor(catalogQuery.data?.options.video, choice), changed, videoResolution));
     const running = mediaBusy(segment.videoStatus);
     const writingNow = segment.promptStatus === "queued" || segment.promptStatus === "running";
     const sent = [segment.request.header, segment.videoPrompt.trim()].filter(Boolean).join("\n\n");
@@ -297,13 +304,14 @@ function SegmentToolbar({
                     type="primary"
                     size="small"
                     icon={running ? <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" /> : <Play className="size-3.5" />}
-                    disabled={busy || !promptReady(segment) || running || Boolean(segment.request.unknownReferences?.length)}
+                    disabled={busy || !promptReady(segment) || running || Boolean(segment.request.unknownReferences?.length) || quoteMissing}
                     onClick={() => onGenerate(changed ? choice : undefined)}
                 >
                     {generateLabel}
                 </Button>
             </div>
             {!promptReady(segment) && !running ? <p className="drama-sdx-hint">提示词就绪后才能生成视频</p> : null}
+            {quoteMissing && !running ? <p className="drama-sdx-hint is-error">{SEGMENT_NO_QUOTE_HINT}</p> : null}
             {segment.request.unknownReferences?.length ? <p className="drama-sdx-hint is-error">提示词里的 {segment.request.unknownReferences.join("、")} 不是本段的参考图，改正编号后才能生成视频</p> : null}
         </section>
     );
@@ -413,6 +421,18 @@ function ReferenceBoard({ segment, shots, castById, busy, onChange, onOpenCast }
                     />
                 ))}
             </div>
+            {request.audioReferences?.length ? (
+                <div className="drama-sdx-voices" aria-label="本段参考音频">
+                    {request.audioReferences.map((voice) => (
+                        <span key={voice.castId} className={`drama-sdx-voice ${voice.sent ? "" : "is-missing"}`} title={voice.sent ? `${voice.label}：${voice.name}的声音，随请求发送` : voice.note}>
+                            <Mic className="size-3" />
+                            <b>{voice.sent ? voice.label?.replace("参考音频", "音") : "未发"}</b>
+                            {voice.name}
+                            {voice.sent ? null : <small>{voice.note}</small>}
+                        </span>
+                    ))}
+                </div>
+            ) : null}
             <div className="drama-sdx-assets-foot">
                 <Select
                     className="drama-sdx-add"

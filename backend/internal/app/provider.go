@@ -224,8 +224,8 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 	if err := s.validateGenerationInterface(input.Mode, input.Config.InterfaceType); err != nil {
 		return nil, err
 	}
-	if isVolcengineJiMengProtocol(input.Config.InterfaceType) && strings.TrimSpace(input.Config.SecretKey) == "" {
-		return nil, errors.New("即梦官方 API 缺少 Secret Key")
+	if adapter, ok := protocolAdapterForContext(ctx, input.Config.InterfaceType); ok && protocolAuthUsesSecretKey(adapter.Metadata().Auth) && strings.TrimSpace(input.Config.SecretKey) == "" {
+		return nil, fmt.Errorf("%s 协议缺少 Secret Key，请在渠道中配置后重试", adapter.Metadata().Name)
 	}
 	if input.Mode == "image" {
 		if err := s.validateResolvedImageCapability(&input); err != nil {
@@ -236,6 +236,9 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 		if err := s.validateResolvedVideoCapability(&input); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.validateArkPortraitReferences(userID, &input); err != nil {
+		return nil, err
 	}
 	if resumedProviderRequestID(ctx) == "" {
 		mediaPolicy := providerMediaHydrationPolicyFor(ctx, input)
@@ -262,7 +265,16 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 			}
 			return runAgentToolTask(ctx, input)
 		}
-		result, taskErr := runTextTask(ctx, input)
+		var result map[string]interface{}
+		var taskErr error
+		if draft, ok := ecommercePlanningBatchable(input); ok {
+			result, taskErr = runEcommercePlanningBatches(ctx, input, draft)
+		} else {
+			result, taskErr = runTextTask(ctx, input)
+		}
+		if taskErr == nil {
+			taskErr = s.validateEcommerceWorkbenchResult(userID, input, result)
+		}
 		if taskErr == nil && promptTemplateOperation != "" {
 			taskErr = validatePromptTemplateResult(promptTemplateOperation, result)
 		}

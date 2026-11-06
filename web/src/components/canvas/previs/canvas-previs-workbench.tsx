@@ -88,10 +88,10 @@ import { describePrevisSaveStatus, shouldBlockPrevisUnload, resolvePrevisCloseOu
 import { usePrevisSaveCoordinator } from "@/components/canvas/previs/use-previs-save-coordinator";
 import "./canvas-previs-workbench.css";
 import { useAssetStore, type ModelAsset } from "@/stores/use-asset-store";
+import { useAppearanceStore } from "@/stores/use-appearance-store";
 import { usePrevisWorkbenchStore } from "@/stores/canvas/use-previs-workbench-store";
 import { PREVIS_MODES, previsModeCapabilities } from "@/lib/canvas/previs/previs-modes";
 import { useActiveTheme } from "@/stores/canvas/use-canvas-theme-store";
-import { useAppearanceStore } from "@/stores/use-appearance-store";
 import type { CanvasNodeData } from "@/types/canvas";
 import type { PrevisCameraMove, PrevisRenderMode, PrevisScene, PrevisSceneOutput, PrevisTransform, PrevisVec3 } from "@/types/previs";
 export { cameraMoveOptions, poseOptions, shotSizeOptions } from "./previs-inspectors";
@@ -1145,6 +1145,9 @@ export function CanvasPrevisWorkbench({
     // 监看窗口每帧读取最新的镜头、渲染模式与播放头；只写 ref，不触发重渲染。
     const monitorStateRef = useRef({ shot: activeShot, mode: renderMode, playhead });
     monitorStateRef.current = { shot: activeShot, mode: renderMode, playhead };
+    useEffect(() => {
+        monitorRef.current?.setBrandName(brandName);
+    }, [brandName]);
     useEffect(
         () => () => {
             monitorRef.current?.close();
@@ -1319,7 +1322,9 @@ export function CanvasPrevisWorkbench({
                     <X className="size-4" />
                 </button>
                 <div className="previs-desk-brand">
-                    <span className="previs-desk-logo">{brandName}</span>
+                    <span className="previs-desk-logo" title={brandName}>
+                        {brandName}
+                    </span>
                     <span className="previs-desk-brand-title">预演台</span>
                     <span className="previs-desk-brand-sub">AI 短剧预演</span>
                 </div>

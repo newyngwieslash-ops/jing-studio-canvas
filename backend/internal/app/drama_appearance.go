@@ -83,7 +83,7 @@ func (s *Service) StartDramaAppearanceRewrite(userID string, projectID string, c
 		"textOptions": map[string]any{"stream": true},
 		"metadata":    map[string]any{"source": dramaAppearanceRewriteSource, "domainProjectId": project.ID, "castId": castID},
 	}
-	task, err := run.createTaskWith(run.settings.Models.textFor(DramaStepBible), "text", "text", prompt, input)
+	task, err := run.createTaskWith(nil, run.settings.Models.textFor(DramaStepBible), "text", "text", prompt, input)
 	if err != nil {
 		return DramaAppearanceRewriteStart{}, err
 	}

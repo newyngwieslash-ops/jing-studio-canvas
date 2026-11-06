@@ -282,6 +282,9 @@
     border-top: 0;
     padding: 8px;
 }
+.drama-compose-novel .drama-chapter-pick {
+    flex: 1;
+}
 
 .drama-compose-main {
     min-height: 0;
@@ -390,6 +393,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
 }
+/* 积分区间较长，允许在区间符处换行，完整区间见卡片 title。 */
+.drama-compose-estimate b.is-wrap {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
+}
 .drama-compose-estimate span {
     font-size: var(--fs-micro);
     color: var(--drama-muted);
@@ -450,10 +459,64 @@
 .drama-chapter-row:hover {
     background: var(--surface-hover);
 }
-.drama-chapter-row[aria-selected="true"] {
+.drama-chapter-row[aria-selected="true"],
+.drama-chapter-row[aria-current="true"] {
     background: var(--surface);
     color: var(--foreground);
     box-shadow: var(--shadow-xs);
+}
+
+/* 章节勾选目录：勾选决定先加入制作的章节，点标题只切换预览。 */
+.drama-chapter-pick {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.drama-chapter-pick-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--drama-line);
+    font-size: var(--fs-tiny);
+    color: var(--drama-muted);
+}
+.drama-chapter-pick-count b {
+    color: var(--foreground);
+    font-variant-numeric: tabular-nums;
+}
+.drama-chapter-pick-quick {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.drama-chapter-pick-quick .ant-input-number {
+    width: 64px;
+}
+.drama-chapter-pick-actions {
+    display: inline-flex;
+    margin-left: auto;
+}
+.drama-chapter-pick .drama-chapter-list {
+    flex: 1;
+    min-height: 0;
+}
+.drama-chapter-pick-row {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr);
+    align-items: center;
+    width: 100%;
+    padding-left: 6px;
+}
+.drama-chapter-pick-row .drama-chapter-row {
+    padding-left: 4px;
+}
+.drama-chapter-pick-row:not(.is-picked) .drama-chapter-row {
+    color: var(--drama-muted);
 }
 .drama-chapter-row .is-num,
 .drama-chapter-row .is-count {
@@ -481,6 +544,25 @@
     flex: none;
     margin-top: 2px;
     color: var(--drama-warn);
+}
+.drama-issue.is-blocking {
+    color: var(--status-error);
+}
+.drama-issue.is-blocking svg {
+    color: var(--status-error);
+}
+.drama-stat-total {
+    font-size: var(--fs-tiny);
+    font-weight: 500;
+    color: var(--drama-muted);
+}
+.drama-chapter-pick-note {
+    margin: 0;
+    padding: 8px 16px 12px;
+    border-top: 1px solid var(--drama-line);
+    font-size: var(--fs-tiny);
+    line-height: 1.5;
+    color: var(--drama-muted);
 }
 
 .drama-option-label {
@@ -825,6 +907,29 @@
         display: none;
     }
 }
+/* 窄屏顶栏折行：标题与操作一行，视图导航独占一行并可横向滚动；操作按钮只留图标。 */
+@media (max-width: 720px) {
+    .drama-studio {
+        grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+    .drama-topbar {
+        flex-wrap: wrap;
+        row-gap: 8px;
+        padding: 8px 8px 8px 4px;
+    }
+    .drama-topbar-title {
+        flex: 1 1 0;
+    }
+    .drama-topbar-actions {
+        gap: 4px;
+    }
+    .drama-topbar-actions .ant-btn {
+        padding-inline: 8px;
+    }
+    .drama-topbar-action-label {
+        display: none;
+    }
+}
 
 .drama-body {
     display: grid;
@@ -845,12 +950,28 @@
         grid-template-columns: 232px minmax(0, 1fr);
     }
 }
+/* 集列表与制作区的分段切换只在窄屏出现；宽屏两栏并排。 */
+.drama-mobile-tabs {
+    display: none;
+}
 @media (max-width: 720px) {
     .drama-body,
     .drama-body.is-inspector-hidden {
         grid-template-columns: 1fr;
+        grid-template-rows: auto minmax(0, 1fr);
     }
-    .drama-rail {
+    .drama-mobile-tabs {
+        display: block;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--drama-line);
+    }
+    .drama-body[data-mobile-pane="production"] .drama-rail {
+        display: none;
+    }
+    .drama-body[data-mobile-pane="episodes"] .drama-rail {
+        border-right: 0;
+    }
+    .drama-body[data-mobile-pane="episodes"] .drama-main {
         display: none;
     }
 }
@@ -1004,6 +1125,42 @@
 }
 .drama-ep.is-review .drama-ep-meta span {
     color: var(--drama-warn);
+}
+/* 分集行的更多操作（插入、删除）：悬停、键盘聚焦、当前集或菜单打开时显示；触屏没有悬停，常显。 */
+.drama-ep-row .drama-ep-title {
+    padding-right: 26px;
+}
+.drama-ep-more {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    color: var(--drama-faint);
+    opacity: 0;
+    transition:
+        opacity 150ms,
+        background 150ms,
+        color 150ms;
+}
+.drama-ep-row:hover .drama-ep-more,
+.drama-ep-row:focus-within .drama-ep-more,
+.drama-ep-row.is-current .drama-ep-more,
+.drama-ep-more.ant-dropdown-open {
+    opacity: 1;
+}
+.drama-ep-more:hover,
+.drama-ep-more.ant-dropdown-open {
+    background: var(--surface-hover);
+    color: var(--foreground);
+}
+@media (hover: none) {
+    .drama-ep-more {
+        opacity: 1;
+    }
 }
 
 /* 矩阵视图：200 集一屏看清卡在哪 */
@@ -1486,6 +1643,22 @@
         display: none;
     }
 }
+@media (max-width: 720px) {
+    .drama-nav {
+        order: 1;
+        flex: 1 1 100%;
+        min-width: 0;
+        margin-left: 0;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    .drama-nav::-webkit-scrollbar {
+        display: none;
+    }
+    .drama-nav-item {
+        flex: none;
+    }
+}
 
 /* 整页视图 */
 .drama-view {
@@ -1814,6 +1987,165 @@
     grid-template-columns: 1fr 1fr;
     gap: 8px;
 }
+/* 角色造型（多妆造）：每套造型一行，带参考图缩略图、名称与默认章节。 */
+.drama-looks {
+    display: grid;
+    gap: 6px;
+}
+.drama-look {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px 4px 4px;
+    border: 1px solid var(--drama-line);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+}
+.drama-look-thumb {
+    position: relative;
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    overflow: hidden;
+    border-radius: var(--radius-md);
+    background: var(--drama-sunken);
+}
+.drama-look-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.drama-look-busy {
+    position: absolute;
+    inset: 0;
+    background: color-mix(in oklab, var(--surface) 55%, transparent);
+    background-image: linear-gradient(120deg, transparent 30%, color-mix(in oklab, var(--workspace-accent) 30%, transparent) 50%, transparent 70%);
+    background-size: 200% 100%;
+    animation: drama-look-shimmer 1.3s linear infinite;
+}
+@keyframes drama-look-shimmer {
+    to {
+        background-position: -200% 0;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .drama-look-busy {
+        animation: none;
+    }
+}
+.drama-look-body {
+    display: grid;
+    min-width: 0;
+    flex: 1;
+    gap: 1px;
+}
+.drama-look-body small {
+    font-size: var(--fs-micro);
+    color: var(--drama-muted);
+}
+.drama-look-actions {
+    display: inline-flex;
+    flex: none;
+}
+.drama-look-form {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid var(--drama-line);
+    border-radius: var(--radius-lg);
+    background: var(--drama-sunken);
+}
+.drama-look-form-range {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-tiny);
+    color: var(--drama-muted);
+}
+.drama-look-form-range .ant-input-number {
+    width: 88px;
+}
+.drama-look-form-range small {
+    flex-basis: 100%;
+    color: var(--drama-faint);
+}
+.drama-look-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+/* 角色声音样本：试听、从声音库选、上传或录制。 */
+.drama-voice {
+    display: grid;
+    gap: 8px;
+}
+.drama-voice-current {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 3px 4px 3px 3px;
+    border: 1px solid var(--drama-line);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    font-size: var(--fs-tiny);
+}
+.drama-voice-play {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 999px;
+    background: var(--foreground);
+    color: var(--background);
+}
+.drama-voice-play:disabled {
+    background: var(--drama-sunken);
+    color: var(--drama-faint);
+    cursor: default;
+}
+.drama-voice-play:focus-visible {
+    outline: 2px solid var(--workspace-accent);
+    outline-offset: 2px;
+}
+.drama-voice-actions,
+.drama-voice-recording {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.drama-voice-recording {
+    font-size: var(--fs-tiny);
+    color: var(--foreground);
+}
+.drama-voice-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--status-error);
+    animation: drama-voice-pulse 1.2s ease-in-out infinite;
+}
+@keyframes drama-voice-pulse {
+    50% {
+        opacity: 0.35;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .drama-voice-dot {
+        animation: none;
+    }
+}
+.drama-voice-error {
+    margin: 0;
+    font-size: var(--fs-micro);
+    color: var(--status-error);
+}
+
 .drama-editor-note {
     font-size: var(--fs-micro);
     line-height: 1.6;
@@ -2964,6 +3296,28 @@
     background: var(--surface-hover);
     color: var(--foreground);
 }
+/* 窄屏统计横向滚动，不截断；展开按钮贴右侧常驻。 */
+@media (max-width: 720px) {
+    .drama-queue-bar {
+        gap: 12px;
+        padding-left: 12px;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    .drama-queue-bar::-webkit-scrollbar {
+        display: none;
+    }
+    .drama-queue-budget {
+        flex: none;
+        overflow: visible;
+    }
+    .drama-queue-toggle {
+        position: sticky;
+        right: 0;
+        background: var(--drama-sunken);
+        box-shadow: -8px 0 8px -4px var(--drama-sunken);
+    }
+}
 .drama-queue-panel {
     border-top: 1px solid var(--drama-line);
 }
@@ -3025,6 +3379,9 @@
     color: var(--drama-err);
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+.drama-job-error.is-wait {
+    color: color-mix(in oklab, var(--drama-warn) 80%, var(--foreground));
 }
 .drama-job-time {
     color: var(--drama-faint);
@@ -3871,6 +4228,10 @@
 }
 .drama-sbrules-number {
     width: 96px !important;
+}
+/* 自定义对白的输入框带前后缀（语速 4.5 字/秒），比纯秒数框宽。 */
+.drama-sbrules-number.is-wide {
+    width: 136px !important;
 }
 .drama-sbrules-segment {
     display: flex;
@@ -4974,9 +5335,11 @@
     }
 }
 
-/* 横幅：统一由容器控制间距，横幅之间 8px，与下方内容至少 12px，不贴边。 */
+/* 横幅：统一由容器控制间距，横幅之间 8px，与下方内容至少 12px，不贴边。
+   列宽固定为容器宽度：默认的 auto 列会被横幅里不换行的说明撑到全文宽度，整条溢出屏幕。 */
 .drama-banners {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
     padding: 12px 20px;
     border-bottom: 1px solid var(--drama-line);
@@ -5211,6 +5574,14 @@
     border-color: var(--workspace-accent);
     color: var(--workspace-accent);
 }
+.drama-rail-add.is-accent {
+    border-style: solid;
+    border-color: color-mix(in oklab, var(--workspace-accent) 40%, transparent);
+    color: var(--workspace-accent);
+}
+.drama-rail-add + .drama-rail-add {
+    margin-top: 0;
+}
 .drama-rail-add:focus-visible {
     outline: 2px solid var(--workspace-accent);
     outline-offset: 2px;
@@ -5272,28 +5643,40 @@
         display: none;
     }
 }
-/* 提示条压成单行：标题与说明同排，说明过长时截断，悬停看全文。 */
+/* 提示条压成单行：标题与说明同排，说明过长时截断，悬停看全文。
+   窄到放不下标题和按钮时按钮换到第二行并靠右；再窄时标题也截断。 */
 .drama-banners {
     gap: 4px;
     padding: 6px 20px;
 }
 .drama-banners .drama-banner {
+    flex-wrap: wrap;
     gap: 8px;
     padding: 6px 12px;
     border-radius: var(--radius-md);
 }
 .drama-banners .drama-banner-text {
     display: flex;
+    flex: 1 1 20em;
     align-items: baseline;
     gap: 8px;
     overflow: hidden;
 }
+.drama-banners .drama-banner-text + * {
+    margin-left: auto;
+}
 .drama-banners .drama-banner-text strong {
     display: inline;
-    flex: none;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
     white-space: nowrap;
+    text-overflow: ellipsis;
 }
+/* 说明不占基础宽度，只分剩余空间：空间不够时先把说明截短，标题最后才截断。 */
 .drama-banners .drama-banner-text span {
+    flex: 1 1 0;
+    min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -5413,12 +5796,99 @@
     background: color-mix(in oklab, var(--drama-warn) 9%, transparent);
     font-size: var(--fs-tiny);
 }
+/* 删除集确认：生成过视频时要输入“第 N 集”。 */
+.drama-episode-delete {
+    display: grid;
+    gap: 12px;
+    font-size: var(--fs-body);
+    line-height: 1.7;
+}
+.drama-episode-delete p {
+    margin: 0;
+    color: var(--drama-muted);
+}
+.drama-episode-delete-warn {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid color-mix(in oklab, var(--drama-err) 34%, transparent);
+    background: color-mix(in oklab, var(--drama-err) 8%, transparent);
+    color: var(--drama-err);
+    font-size: var(--fs-tiny);
+}
+.drama-episode-delete-warn svg {
+    margin-top: 3px;
+}
+.drama-episode-delete-field {
+    display: grid;
+    gap: 6px;
+    font-size: var(--fs-tiny);
+}
+.drama-episode-delete-field b {
+    font-weight: 600;
+    color: var(--foreground);
+}
 .drama-composer-foot {
     display: flex;
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
     border-top: 1px solid var(--drama-line);
+}
+/* 原著章节弹窗：左侧勾选目录占满高度，右侧只读预览。 */
+.drama-chapter-picker-body {
+    grid-template-columns: 360px minmax(0, 1fr);
+}
+.drama-chapter-picker-side {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-right: 1px solid var(--drama-line);
+    background: var(--drama-sunken);
+}
+.drama-chapter-picker-side .drama-chapter-pick {
+    flex: 1;
+}
+.drama-chapter-picker-side .drama-chapter-list {
+    padding: 6px;
+}
+.drama-chapter-picker-preview {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 4px 4px 0;
+}
+.drama-chapter-picker-preview h3 {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 0 10px;
+    font-size: var(--fs-section);
+    font-weight: 600;
+}
+.drama-chapter-picker-preview h3 small {
+    font-size: var(--fs-tiny);
+    font-weight: 400;
+    color: var(--drama-muted);
+}
+.drama-chapter-picker-preview p {
+    margin: 0;
+    white-space: pre-wrap;
+    font-size: var(--fs-label);
+    line-height: 1.8;
+    color: color-mix(in oklab, var(--foreground) 82%, transparent);
+}
+.drama-chapter-picker-size {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-tiny);
+    color: var(--drama-muted);
+}
+.drama-chapter-picker-size .ant-input-number {
+    width: 64px;
 }
 .drama-composer-count {
     color: var(--drama-faint);
@@ -5427,6 +5897,132 @@
 }
 .drama-composer-count.is-over {
     color: var(--drama-err);
+}
+/* 资产包导出 / 导入与剪映草稿导出：复用 composer 外壳的紧凑单栏弹窗。 */
+.drama-composer.drama-transfer {
+    height: auto;
+    max-height: min(720px, calc(100vh - 64px));
+}
+.drama-transfer-body {
+    display: grid;
+    align-content: start;
+    gap: 12px;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px 20px;
+}
+.drama-transfer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.drama-transfer-episodes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.drama-transfer-episode {
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--drama-line);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--foreground);
+    font-size: var(--fs-tiny);
+    font-variant-numeric: tabular-nums;
+    transition:
+        border-color 0.15s,
+        background-color 0.15s;
+}
+.drama-transfer-episode:hover:not(:disabled) {
+    border-color: var(--drama-line-strong);
+}
+.drama-transfer-episode[aria-pressed="true"] {
+    border-color: var(--workspace-accent);
+    background: var(--workspace-accent-soft);
+    color: var(--workspace-accent);
+    font-weight: 600;
+}
+.drama-transfer-episode:disabled {
+    cursor: not-allowed;
+    color: var(--drama-faint);
+    background: var(--drama-sunken);
+}
+.drama-transfer-options {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--drama-line);
+    border-radius: var(--radius-lg);
+    background: var(--drama-sunken);
+}
+.drama-transfer-note {
+    margin: 0;
+    color: var(--drama-muted);
+    font-size: var(--fs-tiny);
+    line-height: 1.6;
+}
+.drama-transfer-problem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: color-mix(in oklab, var(--drama-warn) 80%, var(--foreground));
+    font-size: var(--fs-tiny);
+    line-height: 1.6;
+}
+.drama-transfer-file {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    border: 1px dashed var(--drama-line-strong);
+    border-radius: var(--radius-lg);
+    color: var(--drama-muted);
+}
+.drama-transfer-file strong {
+    display: block;
+    overflow: hidden;
+    color: var(--foreground);
+    font-size: var(--fs-label);
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drama-transfer-file span {
+    display: block;
+    margin-top: 2px;
+    font-size: var(--fs-tiny);
+}
+.drama-transfer-plan {
+    display: grid;
+    gap: 8px;
+    color: var(--drama-muted);
+    font-size: var(--fs-tiny);
+    line-height: 1.6;
+}
+.drama-transfer-plan summary {
+    cursor: pointer;
+    color: var(--foreground);
+}
+.drama-transfer-plan ul,
+.drama-transfer-steps {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding-left: 18px;
+    color: var(--drama-muted);
+    font-size: var(--fs-tiny);
+    line-height: 1.6;
+}
+.drama-transfer-plan ul {
+    max-height: 160px;
+    overflow-y: auto;
+    margin-top: 4px;
+    list-style: disc;
+}
+.drama-transfer-steps {
+    list-style: decimal;
 }
 @media (max-width: 820px) {
     .drama-composer-body {
@@ -5823,6 +6419,43 @@ button.drama-sdx-asset-text:focus-visible {
     flex-wrap: wrap;
     align-items: center;
     gap: 8px 12px;
+}
+/* 本段参考音频：说话角色的声音样本，没发送的写明原因。 */
+.drama-sdx-voices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.drama-sdx-voice {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 26px;
+    max-width: 100%;
+    padding: 2px 10px;
+    border: 1px solid var(--drama-line);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--foreground);
+    font-size: var(--fs-micro);
+}
+.drama-sdx-voice b {
+    color: var(--workspace-accent);
+    font-weight: 600;
+}
+.drama-sdx-voice small {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--drama-muted);
+}
+.drama-sdx-voice.is-missing {
+    border-color: color-mix(in oklab, var(--drama-warn) 40%, transparent);
+    color: var(--drama-muted);
+}
+.drama-sdx-voice.is-missing b {
+    color: var(--drama-warn);
 }
 .drama-sdx-assets-foot small {
     flex: 1;

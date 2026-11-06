@@ -119,6 +119,11 @@ func newDramaTestService(t *testing.T) (*Service, *fakeDramaBackend) {
 	svc.dramaTailFrameHook = func(userID, resourceID string) (string, error) {
 		return fake.resource(userID, "image", "image/png"), nil
 	}
+	// 尾帧抽取在生产里走后台 worker；测试同步执行，固定轮数的调度断言不受 goroutine 时序影响。
+	svc.dramaBackgroundRunner = func(fn func()) bool {
+		fn()
+		return true
+	}
 	video := dramaVideoFixture()
 	raw, _ := json.Marshal(&ModelCapabilityConfig{Version: 1, Video: &video})
 	if err := db.Create(&model.ChannelModel{ID: "drama-video", ChannelID: "ch", ModelKey: "video", Capability: "video", Protocol: model.ChannelInterfaceVolcengineArkVideo, Enabled: true, CapabilityConfigJSON: string(raw)}).Error; err != nil {
@@ -396,7 +401,9 @@ func TestDramaTailFailureRetriesPaidOutputWithoutNewGeneration(t *testing.T) {
 func TestDramaBudgetPausesDispatch(t *testing.T) {
 	svc, fake := newDramaTestService(t)
 	project := createTestDrama(t, svc, DramaReviewAuto).Project.ID
-	if err := svc.repo.UpdateDramaProduction(project, map[string]any{"budget_microcredits": 100, "spent_microcredits": 100}); err != nil {
+	// 预算按订单口径判断：冻结中的订单按冻结额计入，不看 spent_microcredits 缓存。
+	seedDramaBillingOrder(t, fake.db, project, "held", model.BillingOrder{AmountMicrocredits: 100, Status: model.BillingStatusReserved})
+	if err := svc.repo.UpdateDramaProduction(project, map[string]any{"budget_microcredits": 100}); err != nil {
 		t.Fatal(err)
 	}
 	runDramaTicks(t, svc, project, 1)

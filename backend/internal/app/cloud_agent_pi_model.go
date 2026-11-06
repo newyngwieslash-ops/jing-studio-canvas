@@ -214,6 +214,10 @@ func (s *Service) runCloudAgentModelStep(ctx context.Context, userID, runID stri
 		if run.Status == "waiting_approval" && state.Approval != nil {
 			return nil, false, errCloudAgentAwaitingApproval
 		}
+		// 批次在后台执行时同理：结束后由执行器写入回执并用恢复提示词续跑。
+		if cloudAgentMediaBatchActive(&state) {
+			return nil, false, errCloudAgentAwaitingApproval
+		}
 		if cloudAgentStepBudgetExhausted(&state) {
 			// 最终回答之后的插话续步会在这里撞上限；若确实停在最终回答边界，
 			// 按完成收尾而不是把整轮判失败（见 settleCloudAgentPiFinalAnswer）。
@@ -525,6 +529,10 @@ func (s *Service) cloudAgentModelTaskRetryable(taskID string) bool {
 		return false
 	}
 	if cloudAgentEmptyModelOutput(task) || cloudAgentStepTimedOut(task) {
+		return true
+	}
+	// 域名解析失败发生在连接建立前，请求未送达上游，多为 DNS 抖动，按网络错误重试。
+	if diagnostic := taskExecutionDiagnostic(task); diagnostic != nil && diagnostic.Code == string(ReasonUpstreamDNSFailed) {
 		return true
 	}
 	call, err := s.repo.LatestAPICallForTask(taskID)
