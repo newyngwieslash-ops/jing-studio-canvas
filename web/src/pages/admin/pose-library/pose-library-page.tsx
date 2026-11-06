@@ -489,7 +489,7 @@ function PoseLibraryImportModal({ open, onClose, onImported }: { open: boolean; 
                         <li>在下面选择这个文件，勾选要导入的体系。成人向体系默认不勾选。</li>
                         <li>导入后回到列表点「同步图片」，服务器把图片下载到本站数据目录。</li>
                     </ol>
-                    <p className="mt-2">也支持影策通用姿势包（format: yingce-pose-library），格式见文档「姿势库」。</p>
+                    <p className="mt-2">也支持晶电影工作室通用姿势包（format: yingce-pose-library），格式见文档「姿势库」。</p>
                 </Callout>
 
                 <div>

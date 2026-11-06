@@ -209,7 +209,7 @@ func (s *Service) PrepareDramaJianyingDraft(userID, projectID, episodeID string,
 	settings := parseDramaSettings(productionRow.SettingsJSON)
 	width, height := dramaRenderSize(settings.AspectRatio)
 	now := time.Now()
-	name := jianying.SafeName(fmt.Sprintf("%s-第%02d集-%s", project.Name, episode.Number, now.In(dramaExportLocation).Format("0102-1504")), "影策短剧草稿", 80)
+	name := jianying.SafeName(fmt.Sprintf("%s-第%02d集-%s", project.Name, episode.Number, now.In(dramaExportLocation).Format("0102-1504")), "晶电影工作室短剧草稿", 80)
 	draft := jianying.Draft{Name: name, Root: root, Width: width, Height: height, FPS: 30, Now: now}
 	archive := newDramaArchive(name + ".zip")
 	shotsBySegment := dramaShotsBySegment(shots)
@@ -327,7 +327,7 @@ func (s *Service) dramaDraftCover(userID string, resourceID string) []byte {
 
 func dramaJianyingReadme(draft jianying.Draft, skipped []string) string {
 	var builder strings.Builder
-	builder.WriteString("影策短剧 · 剪映草稿\n\n")
+	builder.WriteString("晶电影工作室短剧 · 剪映草稿\n\n")
 	builder.WriteString("使用方法：\n")
 	builder.WriteString("1. 关闭剪映专业版。\n")
 	fmt.Fprintf(&builder, "2. 把压缩包解压到剪映草稿目录，确保文件夹「%s」直接位于：\n   %s\n", draft.Name, draft.Root)
@@ -439,7 +439,7 @@ func (s *Service) PrepareDramaAssetPackage(userID, projectID string, req DramaAs
 	}
 	settings := parseDramaSettings(productionRow.SettingsJSON)
 	now := time.Now()
-	root := jianying.SafeName(project.Name, "影策短剧", 60) + "-资产包"
+	root := jianying.SafeName(project.Name, "晶电影工作室短剧", 60) + "-资产包"
 	archive := newDramaArchive(root + "-" + now.In(dramaExportLocation).Format("0102-1504") + ".zip")
 	manifest := dramaAssetManifest{
 		Format: DramaAssetPackageFormat, Version: dramaAssetPackageVersion, ExportedAt: now.In(dramaExportLocation).Format(time.RFC3339),

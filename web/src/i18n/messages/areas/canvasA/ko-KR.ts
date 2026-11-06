@@ -661,7 +661,7 @@ export const koKR: DeepStringRecord<typeof zhCN> = {
         allLoaded: "모두 불러옴",
         pinLimit: "최대 {{limit}}개 고정",
         other: "기타",
-        defaultAuthor: "Yingce 크리에이터",
+        defaultAuthor: "晶电影工作室 크리에이터",
         pinnedHere: "이 대화에 고정됨",
         pinLimitTitle: "대화마다 최대 {{limit}}개의 스킬을 고정할 수 있습니다",
         pinHint: "고정하면 이 대화에서 우선 사용합니다. 고정하지 않아도 Agent가 작업에 맞게 자동으로 찾습니다",

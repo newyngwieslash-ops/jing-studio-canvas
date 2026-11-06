@@ -660,7 +660,7 @@ export const zhCN = {
         allLoaded: "已加载全部",
         pinLimit: "最多固定 {{limit}} 个",
         other: "其他",
-        defaultAuthor: "影策创作者",
+        defaultAuthor: "晶电影工作室创作者",
         pinnedHere: "本对话已固定",
         pinLimitTitle: "每个对话最多固定 {{limit}} 个 Skills",
         pinHint: "固定后本对话优先使用；不固定 Agent 也会按任务自动查找",

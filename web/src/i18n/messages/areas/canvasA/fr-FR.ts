@@ -661,7 +661,7 @@ export const frFR: DeepStringRecord<typeof zhCN> = {
         allLoaded: "Tout est chargé",
         pinLimit: "{{limit}} épinglées maximum",
         other: "Autre",
-        defaultAuthor: "Créateur Yingce",
+        defaultAuthor: "Créateur 晶电影工作室",
         pinnedHere: "Épinglée à cette conversation",
         pinLimitTitle: "Chaque conversation peut épingler au maximum {{limit}} compétences",
         pinHint: "Une fois épinglée, elle est utilisée en priorité dans cette conversation ; sinon, l'Agent la trouve automatiquement selon la tâche",

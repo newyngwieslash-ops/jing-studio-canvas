@@ -114,7 +114,7 @@ export function buildTimelineAigcLabel(propagateId: string): string {
 
 /** 成片元数据参数：丢弃源文件继承的全局元数据，写入 AIGC 隐式标识与来源说明。 */
 export function buildTimelineProvenanceArgs(propagateId: string, sourceClipCount: number): string[] {
-    return ["-map_metadata", "-1", "-movflags", "+faststart+use_metadata_tags", "-metadata", `AIGC=${buildTimelineAigcLabel(propagateId)}`, "-metadata", `comment=影策时间线合成；来源片段：${sourceClipCount} 个`];
+    return ["-map_metadata", "-1", "-movflags", "+faststart+use_metadata_tags", "-metadata", `AIGC=${buildTimelineAigcLabel(propagateId)}`, "-metadata", `comment=晶电影工作室时间线合成；来源片段：${sourceClipCount} 个`];
 }
 
 function outputArgs(head: string[], provenance: string[], output: string): TimelineOutputArgs {

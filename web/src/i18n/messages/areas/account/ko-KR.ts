@@ -559,7 +559,7 @@ export const koKR: DeepStringRecord<typeof zhCN> = {
         lookPicker: "홈 소재 버전",
         look: "소재 버전",
         demoCredit: "데모 소재 · CC BY",
-        storyLabel: "영책 창작 여정",
+        storyLabel: "晶电影工作室 창작 여정",
         watchClip: "클립 보기",
         enterStudio: "창작 현장으로",
         nextChapter: "다음 막",

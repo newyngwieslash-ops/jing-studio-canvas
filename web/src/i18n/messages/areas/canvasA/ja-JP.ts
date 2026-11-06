@@ -661,7 +661,7 @@ export const jaJP: DeepStringRecord<typeof zhCN> = {
         allLoaded: "すべて読み込みました",
         pinLimit: "最大 {{limit}} 個まで固定",
         other: "その他",
-        defaultAuthor: "影策クリエイター",
+        defaultAuthor: "晶电影工作室クリエイター",
         pinnedHere: "この会話で固定済み",
         pinLimitTitle: "1 つの会話で固定できるスキルは最大 {{limit}} 個です",
         pinHint: "固定するとこの会話で優先使用されます。固定しなくても Agent がタスクに応じて自動で探します",

@@ -561,7 +561,7 @@ export const jaJP: DeepStringRecord<typeof zhCN> = {
         lookPicker: "トップページの素材バージョン",
         look: "素材バージョン",
         demoCredit: "デモ素材 · CC BY",
-        storyLabel: "影策の創作の旅",
+        storyLabel: "晶电影工作室の創作の旅",
         watchClip: "クリップを見る",
         enterStudio: "制作現場へ",
         nextChapter: "次の幕へ",
