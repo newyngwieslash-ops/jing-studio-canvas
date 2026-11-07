@@ -1510,6 +1510,9 @@
 .drama-tab:hover {
     color: var(--foreground);
 }
+.drama-tab:disabled {
+    opacity: 0.45;
+}
 .drama-tab:is([aria-selected="true"], [aria-checked="true"]) {
     background: var(--surface);
     color: var(--foreground);

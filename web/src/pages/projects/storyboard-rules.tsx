@@ -23,6 +23,10 @@ import {
     parseEpisodeSeconds,
     segmentLimits,
     segmentTargetSeconds,
+    SEGMENT_TARGETS,
+    segmentTargetOf,
+    withSegmentTarget,
+    type SegmentTarget,
     shotTarget,
     TRANSITION_LABEL,
     type DialogueRule,
@@ -92,6 +96,37 @@ export function EpisodeDurationInput({ value, onChange }: { value: number; onCha
                 />
             </Dropdown>
             {error ? <small className="drama-field-error">{error}</small> : <small className="drama-field-hint">约 {Math.round((value / 60) * 10) / 10} 分钟 · 也可直接输入</small>}
+        </div>
+    );
+}
+
+/** 单段时长快捷项：写入分镜规则的剧情段字段，和中间栏“分镜规则”是同一份设置。超过视频模型单次上限的秒数不可选。 */
+export function SegmentTargetField({ value, onChange, maxVideoSeconds }: { value?: DramaStoryboardSettings; onChange: (value: DramaStoryboardSettings) => void; maxVideoSeconds?: number }) {
+    const current = segmentTargetOf(value);
+    const options: Array<{ target: SegmentTarget; label: string }> = [{ target: "auto", label: maxVideoSeconds ? `智能 · ≤${maxVideoSeconds} 秒` : "智能" }, ...SEGMENT_TARGETS.map((seconds) => ({ target: seconds, label: `${seconds} 秒` }))];
+    const rule = segmentRuleLabel(segmentLimits(normalizeStoryboard(value), maxVideoSeconds));
+    return (
+        <div className="drama-field">
+            <div className="drama-tabs drama-res-tabs" role="radiogroup" aria-label="单段时长">
+                {options.map((option) => {
+                    const tooLong = typeof option.target === "number" && Boolean(maxVideoSeconds) && option.target > (maxVideoSeconds || 0);
+                    return (
+                        <button
+                            key={option.target}
+                            type="button"
+                            role="radio"
+                            className="drama-tab"
+                            aria-checked={current === option.target}
+                            disabled={tooLong}
+                            title={tooLong ? `当前视频模型单次最长 ${maxVideoSeconds} 秒` : undefined}
+                            onClick={() => onChange(withSegmentTarget(value, option.target))}
+                        >
+                            {option.label}
+                        </button>
+                    );
+                })}
+            </div>
+            <small className="drama-field-hint">{current === "custom" ? `自定义：${rule}，可在中间栏“分镜规则”调整` : `${rule}；单段越短，段数越多`}</small>
         </div>
     );
 }

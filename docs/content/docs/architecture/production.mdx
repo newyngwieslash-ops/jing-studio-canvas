@@ -52,6 +52,8 @@ Job.Kind 包括 bible、plan、cast_image、script、segment_prompt、segment_vi
 
 段提示词字符预算会扣除提交时追加的参考图说明；过长结果可在同一作业中继续发起精简任务，并记录前次 Task 花费。作业成功不是只看文本模型返回成功，还要经过结果解析、版本与可执行性检查。
 
+资产提取、分镜拆分和段提示词三个文字步骤均可挂载已添加技能包中的单个文本文件（按 `MaxWritingSkillRunes = 16000` 截断注入）。由于短剧制作是服务端后台非交互单轮流水线，若挂载面向多轮对话 Agent 的超长总控技能（如含强制前置锁问卷门禁的 `short-drama-director/SKILL.md`），模型会因等待用户确认前置锁而返回空的 `characters` / `shots` 数组导致解析失败；多文件技能套装应按步骤选用具体业务子文件，详见 [短剧制作写作技能兼容性排查与改进方案](../../../design/drama-writing-skill-compatibility.md)。
+
 ## 4. 审阅、媒体放行与预算
 
 [`drama_actions.go`](../../../../backend/internal/app/drama_actions.go) 将修改设置、继续制作、逐集批准、媒体放行与重试落实为业务状态更新。

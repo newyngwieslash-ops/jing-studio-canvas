@@ -36,7 +36,7 @@ import { EpisodeGroupField, formatCount, formatCredits, MEDIA_MODE_LABEL, SOURCE
 import { AssetSchemePicker, defaultAssetSettings, useAssetSchemes } from "./asset-scheme";
 import { DramaModelPicker, useDramaModelCatalog } from "./drama-model-picker";
 import { DramaAssetImageModels, DramaTextSteps, VideoResolutionField } from "./step-settings";
-import { EpisodeDurationInput, StoryboardRules } from "./storyboard-rules";
+import { EpisodeDurationInput, SegmentTargetField, StoryboardRules } from "./storyboard-rules";
 import { DramaStylePicker } from "./style-picker";
 import { ChapterPickList } from "./chapter-pick-list";
 import "./drama.css";
@@ -621,6 +621,10 @@ export default function DramaCreatePage() {
                                 <div className="drama-option-label">对白语言</div>
                                 <Select className="w-full" value={language} onChange={setLanguage} options={LANGUAGES.map((value) => ({ value, label: value }))} />
                             </label>
+                        </div>
+                        <div>
+                            <div className="drama-option-label">单段时长</div>
+                            <SegmentTargetField value={storyboard} onChange={setStoryboard} maxVideoSeconds={videoOption?.maxVideoSeconds} />
                         </div>
                         <div>
                             <div className="drama-option-label">生成节奏</div>

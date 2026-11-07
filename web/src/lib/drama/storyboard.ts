@@ -123,6 +123,25 @@ export function segmentLimits(settings: DramaStoryboardSettings, modelMaxSeconds
     return { mode: "auto", min: 0, max: modelMaxSeconds || 0 };
 }
 
+/** 右侧“单段时长”快捷项的秒数；写成范围模式的上限，保留在场景切换处断开。 */
+export const SEGMENT_TARGETS = [15, 30];
+export type SegmentTarget = "auto" | number;
+
+/** 当前分镜规则对应哪个快捷项；在“分镜规则”里配成其他值时返回 custom。 */
+export function segmentTargetOf(settings?: Partial<DramaStoryboardSettings>): SegmentTarget | "custom" {
+    const rules = normalizeStoryboard(settings);
+    if (rules.segmentMode === "auto") return "auto";
+    return rules.segmentMode === "range" && SEGMENT_TARGETS.includes(rules.segmentMaxSeconds) ? rules.segmentMaxSeconds : "custom";
+}
+
+/** 选中快捷项后的分镜规则：智能只切模式、保留数值；N 秒用范围模式，上限 N。 */
+export function withSegmentTarget(settings: Partial<DramaStoryboardSettings> | undefined, target: SegmentTarget): DramaStoryboardSettings {
+    const rules = normalizeStoryboard(settings);
+    if (target === "auto") return { ...rules, segmentMode: "auto" };
+    // 最短先夹到不超过 N：normalizeStoryboard 遇到最短大于最长会对调两者。
+    return normalizeStoryboard({ ...rules, segmentMode: "range", segmentMaxSeconds: target, segmentMinSeconds: Math.min(rules.segmentMinSeconds, target) });
+}
+
 /** 一段的典型时长，用于估算段数：范围取中值，智能按模型上限（段数下限）。 */
 export function segmentTargetSeconds(limits: SegmentLimits) {
     return limits.mode === "range" ? Math.floor((limits.min + limits.max) / 2) : limits.max;
