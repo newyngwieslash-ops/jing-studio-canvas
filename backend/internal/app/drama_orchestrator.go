@@ -1325,7 +1325,7 @@ func (r *dramaRun) submitSegmentPrompt(job *model.DramaJob) (*model.Task, bool, 
 			return nil, false, err
 		}
 		prompt := production.SegmentWriterPrompt(draft.input, production.SegmentVideoPrompt(draft.input), previous, skill)
-		task, err := r.createTaskWith(job, r.settings.Models.textFor(DramaStepPrompt), "text", "text", prompt, r.textInput(job, production.SegmentWriterSystemPrompt()))
+		task, err := r.createTaskWith(job, r.settings.Models.textFor(DramaStepPrompt), "text", "text", prompt, r.textInput(job, production.SegmentWriterSystemPrompt(), DramaStepPrompt))
 		return task, false, err
 	}
 	return nil, true, nil
@@ -1405,7 +1405,7 @@ func (r *dramaRun) condenseSegmentPrompt(job *model.DramaJob, payload dramaRevis
 	payload.Condensed++
 	encoded, _ := json.Marshal(payload)
 	job.PayloadJSON = string(encoded)
-	task, err := r.createTaskWith(job, r.settings.Models.textFor(DramaStepPrompt), "text", "text", production.SegmentCondensePrompt(prompt, payload.MaxChars), r.textInput(job, production.SegmentCondenseSystemPrompt()))
+	task, err := r.createTaskWith(job, r.settings.Models.textFor(DramaStepPrompt), "text", "text", production.SegmentCondensePrompt(prompt, payload.MaxChars), r.textInput(job, production.SegmentCondenseSystemPrompt(), DramaStepPrompt))
 	if err != nil {
 		job.PayloadJSON = previousPayload
 		if errors.Is(err, repository.ErrDramaJobChanged) {
@@ -1479,8 +1479,12 @@ func (r *dramaRun) castImageRatio(kind string) string {
 // textInput 让上游以流式返回：剧本与分镜这类长输出在非流式下要等全部写完才回第一个字节，
 // 中转站前的网关（如 Cloudflare 约 100 秒无响应）会先断开并报 524；流式边写边回，连接一直有数据。
 // 结果仍在流结束后整段写入任务结果，模型声明不支持流式时由执行层改走非流式。
-func (r *dramaRun) textInput(job *model.DramaJob, systemPrompt string) map[string]any {
-	return map[string]any{"config": map[string]any{"systemPrompt": systemPrompt}, "textOptions": map[string]any{"stream": true}, "metadata": r.metadata(job)}
+func (r *dramaRun) textInput(job *model.DramaJob, systemPrompt string, step string) map[string]any {
+	return map[string]any{
+		"config":      map[string]any{"systemPrompt": systemPrompt},
+		"textOptions": map[string]any{"stream": true, "thinkingLevel": r.settings.TextThinking.levelFor(step)},
+		"metadata":    r.metadata(job),
+	}
 }
 
 func (r *dramaRun) loadChapters(ids []string) ([]production.Chapter, error) {
@@ -1511,7 +1515,11 @@ func (r *dramaRun) submitBible(job *model.DramaJob) (*model.Task, bool, error) {
 		return nil, false, err
 	}
 	prompt := production.BiblePrompt(r.project.Name, r.settings.Settings, chapters, dramaBibleSampleRunes, skill)
-	input := map[string]any{"config": map[string]any{"systemPrompt": production.BibleSystemPrompt()}, "textOptions": map[string]any{"stream": true}, "metadata": map[string]any{"source": "drama_production", "domainProjectId": r.project.ID}}
+	input := map[string]any{
+		"config":      map[string]any{"systemPrompt": production.BibleSystemPrompt()},
+		"textOptions": map[string]any{"stream": true, "thinkingLevel": r.settings.TextThinking.levelFor(DramaStepBible)},
+		"metadata":    map[string]any{"source": "drama_production", "domainProjectId": r.project.ID},
+	}
 	task, err := r.createTaskWith(job, r.settings.Models.textFor(DramaStepBible), "text", "text", prompt, input)
 	return task, false, err
 }
@@ -1573,7 +1581,7 @@ func (r *dramaRun) submitPlan(job *model.DramaJob) (*model.Task, bool, error) {
 		previous = last.Cliffhanger
 	}
 	prompt := production.PlanPrompt(r.project.Name, r.settings.Settings, r.bibleSummary(), chapters[payload.Start:payload.End], next+1, previous)
-	task, err := r.createTask(job, "text", "text", prompt, r.textInput(job, production.PlanSystemPrompt()))
+	task, err := r.createTask(job, "text", "text", prompt, r.textInput(job, production.PlanSystemPrompt(), DramaStepPlan))
 	return task, false, err
 }
 
@@ -1604,7 +1612,7 @@ func (r *dramaRun) submitScript(job *model.DramaJob) (*model.Task, bool, error) 
 		CastSummary: r.castSummary("character", 30), PropSummary: r.castSummary("prop", 20), SceneSummary: r.castSummary("scene", 20), SourceChapters: chapters,
 		SourceFormat: episode.SourceFormat, Skill: skill,
 	})
-	task, err := r.createTaskWith(job, r.settings.Models.textFor(DramaStepScript), "text", "text", prompt, r.textInput(job, production.ScriptSystemPrompt()))
+	task, err := r.createTaskWith(job, r.settings.Models.textFor(DramaStepScript), "text", "text", prompt, r.textInput(job, production.ScriptSystemPrompt(), DramaStepScript))
 	return task, false, err
 }
 
@@ -1631,14 +1639,19 @@ func (r *dramaRun) submitCastImage(job *model.DramaJob) (*model.Task, bool, erro
 		baseImage = base
 		operation = "image_to_image"
 	}
-	prompt := production.CastImagePrompt(assets, cast.Kind, cast.Name, appearance, r.settings.StylePrompt, r.meta.VisualRules)
+	// 画风与画面规则写的是成片画幅，设定图有自己的画幅：带入前去掉其中的画幅与横竖构图要求，
+	// 设定和方案模板的文字不动。
+	stylePrompt := production.StripFrameDirectives(r.settings.StylePrompt)
+	visualRules := production.StripFrameDirectives(r.meta.VisualRules)
+	prompt := production.CastImagePrompt(assets, cast.Kind, cast.Name, appearance, stylePrompt, visualRules)
 	if baseImage != nil {
-		prompt = "参考图1是角色" + cast.Name + "的既有形象。保持五官、脸型、体态与参考图1完全一致，只把造型改为：" + appearance + "。" + r.settings.StylePrompt
+		prompt = "参考图1是角色" + cast.Name + "的既有形象。保持五官、脸型、体态与参考图1完全一致，只把造型改为：" + appearance + "。" + stylePrompt
 	}
 	// 资产参考图统一横版 16:9，与作品画幅无关：场景要容纳完整空间，道具要留足展示余量。
 	// 角色按参考图方案的画幅（内置方案均为 16:9，自定义方案可改）。画幅通过尺寸参数约束，
 	// 不只靠提示词；模型给不出接近的尺寸时直接失败并说明原因，不退回模型默认的方图。
 	ratio := r.castImageRatio(cast.Kind)
+	prompt = production.WithAssetRatio(prompt, ratio)
 	request := r.imageRequest(cast.Kind)
 	if request.Issue != "" {
 		return nil, false, errors.New(request.Issue)
