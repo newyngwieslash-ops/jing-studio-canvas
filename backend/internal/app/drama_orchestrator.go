@@ -450,9 +450,31 @@ func (r *dramaRun) plan() error {
 		cast := &r.casts[i]
 		// "" 表示从未请求，只有放行后才自动生成；queued 是用户明确请求（重做、重试或按集放行）。
 		requested := cast.ImageStatus == model.DramaMediaQueued || (cast.ImageStatus == "" && r.assetsReleased())
-		if requested && !cast.Locked {
-			r.enqueue(model.DramaJobCastImage, "", "", cast.ID, castImagePriority(cast.Position), "参考图："+cast.Name, nil)
+		if !requested || cast.Locked {
+			continue
 		}
+		// 造型以角色本体参考图为底图：本体失败或已删除时直接落失败，避免每轮重复排队又被取消。
+		if cast.ParentID != "" {
+			base, baseErr := r.s.repo.DramaCast(r.project.ID, cast.ParentID)
+			switch {
+			case errors.Is(baseErr, gorm.ErrRecordNotFound):
+				if err := r.failCastLook(cast, "角色本体已被删除，无法生成造型参考图"); err != nil {
+					return err
+				}
+				continue
+			case baseErr != nil:
+				return baseErr
+			case base.ImageStatus == model.DramaMediaFailed:
+				if err := r.failCastLook(cast, "角色本体参考图生成失败，请先重试本体"); err != nil {
+					return err
+				}
+				continue
+			case base.ImageStatus != model.DramaMediaReady:
+				// 本体排队、生成中或尚未请求：造型先不排队，等本体就绪后的下一轮再排。
+				continue
+			}
+		}
+		r.enqueue(model.DramaJobCastImage, "", "", cast.ID, castImagePriority(cast.Position), "参考图："+cast.Name, nil)
 	}
 	episodes, err := r.s.repo.DramaEpisodes(r.project.ID)
 	if err != nil {
@@ -501,6 +523,24 @@ func (r *dramaRun) plan() error {
 	if allDone {
 		p.Status, p.Stage = model.DramaStatusCompleted, model.DramaStageDone
 	}
+	return nil
+}
+
+// failCastLook 把等待本体的造型落为失败，并写一条失败作业供「待处理」展示原因；
+// 按造型版本号更新，同一次失败只落一条记录。
+func (r *dramaRun) failCastLook(cast *model.DramaCast, reason string) error {
+	applied, err := r.s.repo.UpdateDramaCastRevision(cast.ID, cast.Revision, map[string]any{"image_status": model.DramaMediaFailed})
+	if err != nil || !applied {
+		return err
+	}
+	cast.ImageStatus = model.DramaMediaFailed
+	now := time.Now()
+	job := model.DramaJob{
+		ID: newID(), ProjectID: r.project.ID, Status: model.DramaJobFailed, Kind: model.DramaJobCastImage, CastID: cast.ID,
+		Priority: castImagePriority(cast.Position), Label: truncateRunes("参考图："+cast.Name, 200), Error: truncateRunes(reason, 500),
+		CreatedAt: now, UpdatedAt: now, FinishedAt: &now,
+	}
+	r.newJobs = append(r.newJobs, job)
 	return nil
 }
 
@@ -1048,6 +1088,15 @@ func (r *dramaRun) applyScriptShots(episode *model.DramaEpisode, scripted []prod
 		hint, ok := lookHints[dramaLookHintKey(casts, characterID)+"|"+production.NormalizeName(name)]
 		if !ok || strings.TrimSpace(hint.Appearance) == "" {
 			return ""
+		}
+		appearanceKey := production.NormalizeName(hint.Appearance)
+		for _, cast := range append(append([]model.DramaCast{}, casts...), created...) {
+			if cast.ID == characterID && production.NormalizeName(cast.Appearance) == appearanceKey {
+				return ""
+			}
+			if cast.ParentID == characterID && production.NormalizeName(cast.Appearance) == appearanceKey {
+				return cast.ID
+			}
 		}
 		look := model.DramaCast{ID: newID(), ProjectID: r.project.ID, Kind: "character", ParentID: characterID, Name: dramaCastName(casts, created, characterID), LookName: truncateRunes(name, 60), Appearance: truncateRunes(hint.Appearance, 1000), Position: position, CreatedAt: now, UpdatedAt: now}
 		position++
@@ -1618,8 +1667,8 @@ func (r *dramaRun) submitScript(job *model.DramaJob) (*model.Task, bool, error) 
 
 func (r *dramaRun) submitCastImage(job *model.DramaJob) (*model.Task, bool, error) {
 	cast, err := r.s.repo.DramaCast(r.project.ID, job.CastID)
-	// 槽位处于 running 可能是本工作的上一轮尝试，只有已就绪或锁定时才不再需要。
-	if err != nil || cast.Locked || cast.ImageStatus == model.DramaMediaReady {
+	// 槽位处于 running 可能是本工作的上一轮尝试，只有已就绪、已失败（终态）或锁定时才不再需要。
+	if err != nil || cast.Locked || cast.ImageStatus == model.DramaMediaReady || cast.ImageStatus == model.DramaMediaDraft || cast.ImageStatus == model.DramaMediaFailed {
 		return nil, true, nil
 	}
 	appearance := firstNonEmpty(cast.Appearance, cast.Description, cast.Role)
@@ -1645,7 +1694,7 @@ func (r *dramaRun) submitCastImage(job *model.DramaJob) (*model.Task, bool, erro
 	visualRules := production.StripFrameDirectives(r.meta.VisualRules)
 	prompt := production.CastImagePrompt(assets, cast.Kind, cast.Name, appearance, stylePrompt, visualRules)
 	if baseImage != nil {
-		prompt = "参考图1是角色" + cast.Name + "的既有形象。保持五官、脸型、体态与参考图1完全一致，只把造型改为：" + appearance + "。" + stylePrompt
+		prompt = "参考图1是角色" + cast.Name + "的既有形象。保持五官、脸型、体态与参考图1完全一致。" + firstNonEmpty(strings.TrimSpace(cast.ImagePrompt), "只把造型改为："+appearance+"。"+stylePrompt)
 	}
 	// 资产参考图统一横版 16:9，与作品画幅无关：场景要容纳完整空间，道具要留足展示余量。
 	// 角色按参考图方案的画幅（内置方案均为 16:9，自定义方案可改）。画幅通过尺寸参数约束，
