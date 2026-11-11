@@ -11,7 +11,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/qiniu/go-sdk/v7 v7.27.0
+	github.com/qiniu/go-sdk/v7 v7.30.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.75
 	github.com/volcengine/volc-sdk-golang v1.0.253
