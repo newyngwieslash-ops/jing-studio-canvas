@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const CurrentSchemaVersion int64 = 92
+const CurrentSchemaVersion int64 = 94
 
 const baselineSchemaChecksum = "sha256:open-ai-canvas-schema-v1-20260830"
 const schemaMigrationAppliedAtIndexChecksum = "sha256:schema-migrations-applied-at-index-v2-20260830"
@@ -34,6 +34,9 @@ const resourceThumbnailChecksum = "sha256:resource-thumbnail-v41-20260927"
 const workbenchToolsMigrationName = "workbench_tools_and_presets"
 const workbenchToolsMigrationChecksum = "sha256:workbench-tools-presets-v54-20261014"
 const legacyWorkbenchToolsMigrationChecksum = "sha256:workbench-tools-presets-v51-20261014"
+const dramaCastFaceMigrationName = "drama_cast_face_reference"
+const dramaCastFaceMigrationChecksum = "sha256:drama-cast-face-reference-v93-20261108"
+const legacyDramaCastFaceMigrationChecksum = "sha256:drama-cast-face-reference-v92-20261108"
 
 const postgresSchemaMigrationLockID int64 = 73123910420260830
 
@@ -328,6 +331,26 @@ var schemaMigrations = []migration{
 		}
 		return nil
 	}},
+	{version: dramaCastFaceMigrationVersion, name: dramaCastFaceMigrationName, checksum: dramaCastFaceMigrationChecksum, apply: func(tx *gorm.DB) error {
+		// 角色的人脸参考图；旧设定没有人脸参考，写成空串。
+		if !tx.Migrator().HasTable(&model.DramaCast{}) || tx.Migrator().HasColumn(&model.DramaCast{}, "FaceResourceID") {
+			return nil
+		}
+		if err := tx.Migrator().AddColumn(&model.DramaCast{}, "FaceResourceID"); err != nil {
+			return err
+		}
+		return tx.Model(&model.DramaCast{}).Where("face_resource_id IS NULL").Update("face_resource_id", "").Error
+	}},
+	{version: 94, name: "tasks_active_claim_partial_index", checksum: "sha256:tasks-active-claim-partial-index-v94-20261111", apply: migrateTasksActiveClaimPartialIndex},
+}
+
+// migrateTasksActiveClaimPartialIndex 为 tasks 增加仅覆盖 queued/running 活跃行的部分索引，
+// 避免历史终态行累积后 ClaimNextTask 退化为临时排序或大范围扫描。
+func migrateTasksActiveClaimPartialIndex(tx *gorm.DB) error {
+	if !tx.Migrator().HasTable(&model.Task{}) {
+		return nil
+	}
+	return tx.Exec("CREATE INDEX IF NOT EXISTS idx_tasks_active_claim ON tasks (created_at, next_poll_at) WHERE status IN ('queued', 'running')").Error
 }
 
 // migrateReferenceVideoCostPrice 为价格档成本和账单成本快照增加带参考视频的成本价。
@@ -1165,6 +1188,46 @@ func normalizeLegacyWorkbenchMigration(tx *gorm.DB) error {
 }
 
 const workbenchToolsMigrationVersion int64 = 54
+const dramaCastFaceMigrationVersion int64 = 93
+
+func normalizeLegacyDramaCastFaceMigration(tx *gorm.DB) error {
+	var legacy schemaMigration
+	if err := tx.First(&legacy, "version = ?", 92).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return fmt.Errorf("读取旧短剧人脸参考迁移记录：%w", err)
+	}
+	if legacy.Name != dramaCastFaceMigrationName || legacy.Checksum != legacyDramaCastFaceMigrationChecksum {
+		return nil
+	}
+
+	var later []schemaMigration
+	if err := tx.Where("version > ?", legacy.Version).Order("version asc").Find(&later).Error; err != nil {
+		return fmt.Errorf("读取旧短剧人脸参考迁移后的记录：%w", err)
+	}
+	if len(later) > 0 {
+		return fmt.Errorf("数据库迁移 92 使用旧短剧人脸参考身份，但已存在后续迁移记录 %d；拒绝自动改写迁移账本", later[0].Version)
+	}
+	if tx.Migrator().HasTable(&model.DramaCast{}) && !tx.Migrator().HasColumn(&model.DramaCast{}, "FaceResourceID") {
+		return fmt.Errorf("数据库迁移 92 记录为旧短剧人脸参考迁移，但 drama_casts.face_resource_id 列缺失；请从备份恢复后再升级")
+	}
+
+	result := tx.Model(&schemaMigration{}).
+		Where("version = ? AND name = ? AND checksum = ?", legacy.Version, legacy.Name, legacy.Checksum).
+		Updates(map[string]any{
+			"version":  dramaCastFaceMigrationVersion,
+			"name":     dramaCastFaceMigrationName,
+			"checksum": dramaCastFaceMigrationChecksum,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("归一化旧短剧人脸参考迁移记录：%w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("归一化旧短剧人脸参考迁移记录影响 %d 行，拒绝继续启动", result.RowsAffected)
+	}
+	return nil
+}
 
 func migrateSchemaV56(tx *gorm.DB) error {
 	if err := tx.AutoMigrate(&model.ApiCallLog{}, &model.Task{}, &model.CreditLedgerEntry{}); err != nil {
@@ -1192,6 +1255,9 @@ func MigrateSchema(db *gorm.DB) error {
 			return fmt.Errorf("初始化数据库迁移记录：%w", err)
 		}
 		if err := normalizeLegacyWorkbenchMigration(tx); err != nil {
+			return err
+		}
+		if err := normalizeLegacyDramaCastFaceMigration(tx); err != nil {
 			return err
 		}
 		plan, err := migrationsForDatabase(tx)

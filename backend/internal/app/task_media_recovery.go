@@ -76,6 +76,22 @@ func mediaStageLabel(stage string) string {
 	}
 }
 
+// mediaFailureDetail 把保存失败的真实原因整理成可写日志的文本：数据目录替换为占位符，
+// URL 去掉查询串，Authorization / Cookie / 各类 key 与 token 打码。
+func (s *Service) mediaFailureDetail(err error) string {
+	text := err.Error()
+	if dir := strings.TrimSpace(s.dataDir); dir != "" {
+		for _, variant := range []string{dir, filepath.Clean(dir), filepath.ToSlash(filepath.Clean(dir))} {
+			text = strings.ReplaceAll(text, variant, "[数据目录]")
+		}
+		if abs, absErr := filepath.Abs(dir); absErr == nil {
+			text = strings.ReplaceAll(strings.ReplaceAll(text, abs, "[数据目录]"), filepath.ToSlash(abs), "[数据目录]")
+		}
+	}
+	// redactDiagnosticText 只打码 "Authorization:" 后的第一个词，"Bearer <token>" 的 token 要单独打码。
+	return redactDiagnosticText(redactDiagnosticMarker(text, "bearer"), 500)
+}
+
 func (s *Service) decodeMediaCheckpoint(task *model.Task) (*mediaCheckpoint, error) {
 	plain, err := s.decryptSettingSecret(task.MediaRecoveryJSON)
 	if err != nil {
@@ -312,6 +328,10 @@ func (s *Service) handleMediaRecoveryFailure(task *model.Task, cause error) erro
 	var failure *mediaRecoveryError
 	if !errors.As(cause, &failure) {
 		failure = &mediaRecoveryError{stage: task.MediaStage, retryable: true, cause: cause}
+	}
+	// 对外只显示“保存未完成：某环节失败”；真实原因（去掉数据目录、URL 查询串与密钥）写进任务日志供排查。
+	if failure.cause != nil {
+		_ = s.log(task.UserID, task.ID, "error", "作品保存失败原因（"+mediaStageLabel(failure.stage)+"）", s.mediaFailureDetail(failure.cause))
 	}
 	if task.MediaRecoveryJSON != "" {
 		checkpoint, decodeErr := s.decodeMediaCheckpoint(task)

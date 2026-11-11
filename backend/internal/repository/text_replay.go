@@ -52,6 +52,9 @@ func (r *Repository) AppendTaskTextDelta(userID string, taskID string, content s
 		created = model.TaskTextDelta{ID: newRepositoryID(), UserID: userID, TaskID: taskID, Sequence: taskUsage.Max + 1, Content: content, ByteCount: incoming, CreatedAt: time.Now(), ExpiresAt: expiresAt}
 		return tx.Create(&created).Error
 	})
+	if err == nil {
+		r.wakeChanged("task-text:" + taskID)
+	}
 	return &created, err
 }
 
@@ -65,7 +68,7 @@ func (r *Repository) TaskTextDeltas(userID string, taskID string, after int64, l
 }
 
 func (r *Repository) CompactTaskTextDeltas(taskID string, expiresAt time.Time, keepDraft bool) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var task model.Task
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ?", taskID).Error; err != nil {
 			return err
@@ -86,6 +89,10 @@ func (r *Repository) CompactTaskTextDeltas(taskID string, expiresAt time.Time, k
 		}
 		return tx.Model(&model.TaskTextDelta{}).Where("task_id = ?", taskID).Update("expires_at", expiresAt).Error
 	})
+	if err == nil {
+		r.wakeChanged("task-text:" + taskID)
+	}
+	return err
 }
 
 func (r *Repository) CleanupTaskTextDeltas(now time.Time) (int64, error) {
@@ -135,6 +142,9 @@ func (r *Repository) CompleteTextReplayTask(userID string, taskID string, result
 			"error": "", "completed_at": &now,
 			"lease_owner": "", "lease_expires_at": nil, "updated_at": now,
 		})
+	if result.Error == nil && result.RowsAffected == 1 {
+		r.wakeChanged("task-text:" + taskID)
+	}
 	return result.RowsAffected == 1, result.Error
 }
 

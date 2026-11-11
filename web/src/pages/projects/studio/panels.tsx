@@ -8,6 +8,7 @@ import { dramaChoiceKey, dramaVideoRatioIssue } from "@/lib/drama/model-choice";
 import { dramaKeys } from "@/lib/drama/drama-query-keys";
 import {
     getDramaCastImpact,
+    recoverDramaCastImage,
     regenerateDramaCast,
     regenerateDramaCasts,
     setDramaCastImage,
@@ -38,6 +39,7 @@ import { CastLibraryPicker } from "./cast-library-picker";
 import { AppearanceRewriteButton } from "./appearance-rewrite";
 import { CastVoiceField, CastVoicePreview } from "./cast-voice";
 import { CastLooks } from "./cast-looks";
+import { CastFaceField } from "./cast-face";
 
 // 制作台的三个整页视图：设定（角色 / 道具 / 场景）、待处理、制作设置。都在主区域内展示，不使用抽屉遮挡。
 
@@ -112,6 +114,7 @@ export function CastPanel({
         }
         return map;
     }, [inbox]);
+    const recoverableCasts = useMemo(() => new Set(inbox.filter((item) => item.kind === "cast_failed" && item.recoverable && item.castId).map((item) => item.castId)), [inbox]);
     const focused = cast.find((item) => item.id === focusId);
     useEffect(() => {
         if (focused) setKind(focused.kind);
@@ -232,6 +235,7 @@ export function CastPanel({
                         projectId={projectId}
                         cast={active}
                         error={castErrors.get(active.id)}
+                        recoverable={recoverableCasts.has(active.id)}
                         looks={cast.filter((item) => item.parentId === active.id)}
                         ratios={ratios}
                         onChanged={onChanged}
@@ -252,6 +256,7 @@ function CastEditor({
     projectId,
     cast,
     error,
+    recoverable = false,
     looks,
     ratios,
     onChanged,
@@ -261,6 +266,8 @@ function CastEditor({
     projectId: string;
     cast: DramaCast;
     error?: string;
+    /** 参考图已生成但保存失败，可重新保存。 */
+    recoverable?: boolean;
     looks: DramaCast[];
     ratios: CastRatios;
     onChanged: () => void;
@@ -296,6 +303,15 @@ function CastEditor({
             onChanged();
         },
         onError: (error) => message.error(error instanceof Error ? error.message : "操作失败"),
+    });
+    // 作品已生成但保存失败：沿用原任务重新保存，不重新生成、不重复扣费。
+    const recover = useMutation({
+        mutationFn: () => recoverDramaCastImage(projectId, cast.id),
+        onSuccess: () => {
+            message.success("正在重新保存作品，完成后自动成为参考图");
+            onChanged();
+        },
+        onError: (error) => message.error(error instanceof Error ? error.message : "恢复失败"),
     });
     // 上传或从素材库选的形象图直接成为参考图并锁定：不会被重新生成覆盖，剧情段视频按这张图生成。
     const fileRef = useRef<HTMLInputElement>(null);
@@ -349,6 +365,11 @@ function CastEditor({
                     {error}
                 </p>
             ) : null}
+            {cast.imageStatus === "failed" && recoverable ? (
+                <Button block icon={<RotateCcw className="size-4" />} loading={recover.isPending} onClick={() => recover.mutate()}>
+                    恢复作品（不重新生成、不重复扣费）
+                </Button>
+            ) : null}
             <div className="drama-editor-row">
                 <span className="drama-eyebrow">{kindLabel}设定</span>
                 <label className="drama-switch-label">
@@ -377,6 +398,11 @@ function CastEditor({
             {isCharacter ? (
                 <Field label="声音样本" hint="支持参考音频的视频模型会在该角色开口的剧情段带上这段声音">
                     <CastVoiceField projectId={projectId} cast={cast} restyle={restyle} onChanged={onChanged} />
+                </Field>
+            ) : null}
+            {isCharacter ? (
+                <Field label="人脸参考" hint="五官以它为准，服装妆造按外貌描述与造型生成">
+                    <CastFaceField projectId={projectId} cast={cast} restyle={restyle} onChanged={onChanged} />
                 </Field>
             ) : null}
             {isCharacter ? <CastLooks projectId={projectId} character={cast} looks={looks} restyle={restyle} onChanged={onChanged} /> : null}

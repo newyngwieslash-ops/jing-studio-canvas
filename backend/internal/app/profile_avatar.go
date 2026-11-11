@@ -7,15 +7,27 @@ import (
 )
 
 func (s *Service) UpdateProfileAvatar(actor *model.User, header *multipart.FileHeader) (*AuthUser, error) {
-	return s.authDomain().UpdateProfileAvatar(actor, header)
+	res, err := s.authDomain().UpdateProfileAvatar(actor, header)
+	if err == nil && actor != nil {
+		s.invalidateUserAuthCache(actor.ID)
+	}
+	return res, err
 }
 
 func (s *Service) UseDefaultProfileAvatar(actor *model.User) (*AuthUser, error) {
-	return s.authDomain().UseDefaultProfileAvatar(actor)
+	res, err := s.authDomain().UseDefaultProfileAvatar(actor)
+	if err == nil && actor != nil {
+		s.invalidateUserAuthCache(actor.ID)
+	}
+	return res, err
 }
 
 func (s *Service) SelectDefaultProfileAvatar(actor *model.User, preset string) (*AuthUser, error) {
-	return s.authDomain().SelectDefaultProfileAvatar(actor, preset)
+	res, err := s.authDomain().SelectDefaultProfileAvatar(actor, preset)
+	if err == nil && actor != nil {
+		s.invalidateUserAuthCache(actor.ID)
+	}
+	return res, err
 }
 
 func (s *Service) ProfileAvatarContent(actor *model.User, targetUserID string) ([]byte, error) {

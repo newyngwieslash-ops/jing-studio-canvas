@@ -24,12 +24,12 @@ var fakeDramaModels = DramaModels{
 }
 
 type fakeDramaBackend struct {
-	t        *testing.T
-	db       *gorm.DB
-	seq      atomic.Int64
-	byKind   map[string]int
-	renders  []renderProject
-	requests []CreateTaskRequest
+	t         *testing.T
+	db        *gorm.DB
+	seq       atomic.Int64
+	byKind    map[string]int
+	renders   []renderProject
+	requests  []CreateTaskRequest
 	fail      func(req CreateTaskRequest) bool
 	imageSize func(req CreateTaskRequest) (int, int)
 }

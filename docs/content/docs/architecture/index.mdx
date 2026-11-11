@@ -1,119 +1,130 @@
 ---
 title: 架构与技术原理
-description: 从源码追踪影策的工作台、生成任务、Agent、短剧制作与数据一致性。
+description: 从源码追踪影策（晶电影工作室）的工作台、生成任务、云端 Agent、短剧制作、电商工作区与数据一致性。
 ---
 
 # 架构与技术原理
 
-影策由浏览器创作工作台、Go 业务后端、Node Pi Agent 执行层及持久化基础设施组成。画布编辑、模型生成、Agent 推理和短剧制作是互相协作的流程，但各自拥有不同状态、授权和完成条件。
+影策（晶电影工作室）由浏览器创作工作台、Go 业务后端、Node Pi Agent 执行层及持久化基础设施组成。无限画布编辑、异步模型生成、Pi Agent 推理与批量生成、短剧自动化制作、电商五步策划以及方舟素材库认证是互相协作的业务流，但各自拥有独立的状态机、授权边界和完成判据。
 
-本组文档基于实际源码和配置阅读，解释当前实现；不将设计提案、工作约定或测试文件的存在等同于已经实现并通过验收。没有新增产品功能或修改业务代码。
+本组文档基于当前代码树实际源码与配置阅读，解释真实控制流与数据合同；不将设计提案、工作约定或测试文件的存在等同于已经上线并通过生产验收。本次仅梳理与更新文档及架构图，未修改业务实现代码。
 
 ## 1. 阅读路线与交互图
 
 | 想理解的问题 | 专题 | 主要内容 |
 | --- | --- | --- |
-| 页面与画布如何工作 | [前端](./frontend.mdx) | React 启动、状态、几何、同步、账号隔离、生成交付、编辑器 |
-| 一次模型生成如何完成 | [后端](./backend.mdx) | 准入、数据库队列、租约、协议、费用、SSE 与媒体回存 |
-| Agent 如何调用模型和工具 | [Agent 与部署](./agent-and-deployment.mdx) | Pi 三条桥、审批暂停、恢复、检查点、部署及更新 |
-| 小说如何成为分集视频 | [短剧制作](./production.mdx) | 领域对象、业务调度、剧情段、预算与精修回写 |
+| 页面、画布、实时协作与工作区如何运行 | [前端架构](./frontend.mdx) | React 启动、画布状态与 LOD、WebSocket 实时协作、账号隔离、生成物化、图片/视频工作台、电商前端、3D 预演与时间线插件 |
+| 一次模型生成、协议适配与资源交付如何完成 | [后端与任务](./backend.mdx) | 准入与思考档位、数据库租约队列、声明式协议宿主、视频与参考视频计费、SSE 回放、资源签名、方舟素材库与姿势库 |
+| Agent 如何调用模型/工具、批量出图与部署更新 | [Agent 与部署](./agent-and-deployment.mdx) | Pi 三条回调桥、29 项工具策略、审批暂停与续跑、批量生成与试跑、长期记忆与画布撤销、电商 Agent 知识库、六服务部署与 Host Updater |
+| 小说如何经分池调度成为连续分集短剧成片 | [短剧制作](./production.mdx) | 领域对象、四类并发池调度、后台尾帧抽取、单段目标时长（4–15 秒）、写作技能兼容、订单级花费汇总、剪映导出与精修画布 |
 
-Archify 图表是可独立打开的 HTML 附件；支持主题、缩放、搜索和导出，不依赖启动产品：
+Archify 3.2 图表与一页式解说页（Explainer）均为可独立打开的 HTML 附件，支持明暗主题、缩放、搜索、步骤高亮与代码悬停查看，不依赖启动开发服务器：
 
-- [系统架构图](../../../architecture/diagrams/system.html)：交互、入口、业务服务、数据库、模型和 Agent 边界。
-- [生成任务时序图](../../../architecture/diagrams/generation.html)：任务创建、领取、上游执行与结果回读。
-- [Agent 审批时序图](../../../architecture/diagrams/agent.html)：推理、工具回调、暂停、批准和续跑。
-- [规格、验证及重现方法](../../../architecture/README.md)：JSON、产物哈希、自动浏览器与视觉审查的独立记录。
+- [一页式架构与技术原理解说页（Explainer）](../../../architecture/diagrams/explainer.html)：结论先行，集中展示核心运行拓扑、生成任务时序、Agent 审批时序、短剧分池工作流、源码摘录与核查清单。
+- [系统架构图](../../../architecture/diagrams/system.html)：创作工作台、Nginx 网关、Go 业务与任务服务、数据库、模型上游与 Pi 运行时边界。
+- [生成任务时序图](../../../architecture/diagrams/generation.html)：任务准入、租约领取、上游执行、租约保护写回与前端结果回读。
+- [Agent 审批时序图](../../../architecture/diagrams/agent.html)：推理会话、`/model` 与 `/tool` 回调、审批暂停、批准执行与带回执续跑。
+- [规格、验证及重现方法](../../../architecture/README.md)：Archify 3.2 JSON/Markdown 规格、产物哈希、自动浏览器检查与重现命令。
 
-图中只画主路径。系统图未展开资源对象存储、Redis 协调、Host Updater 和全部业务域，正文补充这些边界。时序图按职责展开；浏览器查询和 SSE 可以在生成期间并行进行，不要求等 Worker 完成才订阅。
+图中聚焦核心控制路径；Redis 协调、对象存储、方舟素材库、电商知识库、Host Updater 及各业务域细节在五篇正文中完整展开。时序图按职责阶段排列，浏览器轮询与 SSE 订阅可在 Worker 执行期间并行开始。
 
 ## 2. 核验基线
 
-本次基准提交为 `21adab22d65c6cf572f9fd6a910b459c82051c53`。工作区在开始时已有业务修改，包括短剧角色外貌、技能安装和资源引用；本组文档基于读取时的工作树，未将这些变更回滚，也不声称它们已发布。
+本次源码核验基线提交为 `6ab49b692d6ebfd267826d7117f11100f8128af0`（涵盖上游 `v1.8.2` 合并、电商 Agent 与知识库、方舟素材库、画布姿势库、Agent 批量生成与长期记忆、视频参考计费、统一思考等级以及短剧分池调度与单段时长配置）。
 
-系统图的 Archify `--repo-root` 验证绑定该提交的 7 个来源文件，采用 `local-only`：检查本地 Git 对象和来源可定位性，不承诺远程仓库公开，也不证明图中文字全部语义自动正确。正文和另外两张时序图的语义来自代码阅读及交叉核对。
+系统图、时序图与 Explainer 页面通过 Archify 3.2 `--repo-root` 绑定该提交的源码路径与行号区间（`local-only` 模式校验本地 Git 提交对象与文件行范围存在性）。正文语义来自源码调用链追踪与交叉核对。
 
 | 材料 | 可证明什么 | 不能证明什么 |
 | --- | --- | --- |
-| 函数正文、调用方、配置 | 控制流、依赖、当前默认值 | 某生产环境实际采用相同配置 |
-| 模型、事务、测试源码 | 合同与设计的回归入口 | 本次已运行全部业务测试 |
-| Archify 校验及浏览器证据 | 图表可生成、首屏布局与可读性 | 产品登录、生成、计费或恢复正确 |
-| 设计/计划文档 | 历史理由和演进方向 | 当前实现已经达到目标状态 |
+| 函数正文、调用方、配置与 Schema 迁移 | 真实控制流、依赖方向、默认参数与表结构 | 某台生产服务器实际配置了相同环境变量 |
+| 模型定义、事务条件更新、测试源码 | 状态不变量、租约护栏与回归入口 | 本次文档梳理已全量跑通外部模型与容器集成测试 |
+| Archify 3.2 校验及浏览器测量回执 | 图表与解说页结构合法、桌面视口无横向溢出且字号可读 | 产品业务接口、第三方支付或上游模型调用已通过验收 |
+| 设计沉淀与 ADR 文档 | 架构演进背景、取舍理由与分阶段边界 | 提案类文档（如开放插件市场、账号池）已全部落地 |
 
 ## 3. 运行单元与技术栈
 
 | 单元 | 依据 | 执行职责 |
 | --- | --- | --- |
-| `web/` | [package.json](../../../../web/package.json)、[application.tsx](../../../../web/src/application.tsx) | Vite、React、TypeScript、React Router、Ant Design、Zustand、TanStack Query、localforage |
-| `backend/` | [go.mod](../../../../backend/go.mod)、[main.go](../../../../backend/cmd/server/main.go) | Go、Gin、GORM；HTTP、业务治理、后台任务与资源 |
-| Pi runtime | [agent-runtime.mjs](../../../../backend/agent-runtime/pi/agent-runtime.mjs) | Node 会话循环，经 Go bridge 调用模型与受控工具 |
-| `yingce-agent/` | [server.mjs](../../../../yingce-agent/server.mjs) | 远程 Agent 子进程承载；不是业务数据库所有者 |
-| Web 入口 | [nginx.conf](../../../../nginx.conf) | 静态 SPA、API/SSE/WebSocket 代理 |
-| 持久与协调 | [生产 Compose](../../../../docker-compose.deploy.yml) | PostgreSQL、Redis、后端资源卷、Web 版本静态卷 |
-| 文档 | 本目录及 `docs/architecture/` | 当前为仓库 Markdown/MDX 与独立 HTML；未找到文档站构建入口 |
+| `web/` | [package.json](../../../../web/package.json)、[application.tsx](../../../../web/src/application.tsx)、[router.tsx](../../../../web/src/router.tsx) | Vite、React 19、TypeScript、React Router、Ant Design、Tailwind、Zustand、TanStack Query、localforage |
+| `backend/` | [go.mod](../../../../backend/go.mod)、[main.go](../../../../backend/cmd/server/main.go)、[service.go](../../../../backend/internal/app/service.go) | Go 1.25、Gin、GORM；HTTP 鉴权、业务治理、数据库任务队列、短剧调度、协议宿主与资源分发 |
+| Pi runtime | [agent-runtime.mjs](../../../../backend/agent-runtime/pi/agent-runtime.mjs) | Node 会话循环与上下文压缩，经 Go bridge 回调 `/model`、`/tool`、`/event` |
+| `yingce-agent/` | [server.mjs](../../../../yingce-agent/server.mjs) | 生产远程 Agent 子进程池（并发与内存限流）；不直接连接业务数据库 |
+| Web 网关 | [nginx.conf](../../../../nginx.conf) | 静态 SPA 托管、`/api` 反代、特定 SSE 路径禁缓冲、画布实时 WebSocket Upgrade 转发 |
+| 持久与协调 | [docker-compose.deploy.yml](../../../../docker-compose.deploy.yml) | PostgreSQL 17、Redis 7.4（AOF）、后端数据卷 `/data`、Web 跨版本静态资源卷 `web-data` |
+| 文档与架构资产 | 本目录及 [docs/architecture/](../../../architecture/README.md) | 仓库内维护的 MDX 专题文档与 Archify 3.2 独立可交互 HTML 图表 |
 
-版本以清单和锁文件为准。这里不把 `service`、`app`、`repository` 画成独立微服务；它们大部分属于同一个 Go 进程。独立 `yingce-agent` 才是明确的网络和进程边界。本地 embedded 也仍是 Node 子进程，并非 Go 内置 JavaScript VM。
+这里不把后端内部的 `service`、`app`、`repository` 或各领域包画成独立微服务：它们运行在同一个 Go 进程内，通过包边界隔离依赖。独立 `yingce-agent` 容器与宿主机 `Host Updater`（Unix Socket）才是真正的跨进程/网络边界；本地开发未设置 `YINGCE_AGENT_URL` 时的 embedded 模式同样是由 Go 启动的本地 Node 子进程。
 
-## 4. 五条核心技术链
+## 4. 六条核心技术链
 
-### 用户操作与状态同步
+### 4.1 用户操作、账号隔离与实时协作
 
-`页面事件 → 局部状态/共享 Store → 本地持久化与远端同步 → API → 业务归属检查 → 数据库`。
+`页面交互 → 页面局部 State/Ref 或 Zustand Store → 带用户 Scope 的 localforage 快照 & Mutation Journal → HTTP API / WebSocket → 服务端归属与版本校验 → 数据库`。
 
-高频拖拽坐标、稳定画布快照、React Query 查询结果不是同一种数据。账号切换需要等待旧 scope 的生成消费者、缓存写入和同步停止，再恢复新 scope；仅换一个 userId 不足以隔离异步写入。具体见前端专题。
+高频指针拖拽、稳定画布快照、React Query 查询缓存与 WebSocket 实时光标（`canvas-presence-renderer.ts` 直接复用 DOM，不经过 React 重渲染）分属不同通道。账号切换必须先暂停生成结果消费者、在同步独占区内 flush 旧 scope 并清理 Blob/Query 缓存，再切换 scope 与 session generation，防止跨账号串数据。详见 [前端架构](./frontend.mdx)。
 
-### 模型生成与交付
+### 4.2 模型生成、声明式协议与结果交付
 
-`生成意图 → CreateTask → 配额/渠道/费用准入 → Task 持久化 → Worker 领取租约 → Provider → 上游 → 资源回存 → 终态及结果登记 → 前端回读/物化`。
+`生成意图 → CreateTask 准入（冻结逻辑模型路由、归一思考等级、校验参考图/视频与方舟素材授权、预留积分与存储配额） → Task 落库 → Worker 领全局槽与 45s 任务租约 → 声明式/内建 Provider 调用或异步回查 → 媒体回存 → taskLeaseWriter 条件写终态 → 前端 Effect 租约物化上画布`。
 
-任务记录是持久控制面；Redis 槽位解决并发协调。模型返回成功、对象保存成功、Task 终态、画布可见和费用结算分别有自己的失败窗口，不能合并成一个布尔值。媒体保存失败应沿恢复检查点重试保存，不能默认为重新生成。
+数据库 `Task` 表是持久控制面，Redis 负责跨实例槽位、限流与熔断。上游返回成功、平台回存 `Resource` 就绪、Task 终态提交、前端节点附着与账单结算各自存在独立失败窗口：媒体下载或写存储失败会写入加密 `MediaRecoveryJSON` 检查点，后续走“重试保存”而非重新付费生成。详见 [后端与任务](./backend.mdx)。
 
-### Agent 推理与批准
+### 4.3 云端 Agent 推理、审批续跑与批量生成
 
-`用户消息 → Go run → Pi session → /model → Go 模型桥 → /tool → Go 策略`。
+`用户消息 → Go 创建/恢复 Run → Node Pi 会话 → POST /model 走平台文本任务 → POST /tool 查 29 项工具策略 → 需审批时写 waiting_approval 并向 Node 返回 pause 结束进程 → 用户批准后 Go 执行单条或批量生成（支持首条 Canary 试跑） → 携带持久回执重启恢复 Pi`。
 
-工具需要审批时，Go 记录待审批，Node 收到 pause 后结束本轮。批准后 Go 执行已批准操作；媒体后台等待结束后携带回执恢复 Pi。拒绝直接终结，不把拒绝当工具失败继续请求模型。已执行外部操作不能靠重启进程获得“恰好一次”保证。
+Agent 的画布修改会生成带前后哈希的 `canvas_updated.undo` 撤销凭据；长期记忆通过 `memory_update` 维护版本化的用户记忆文档（Schema 76，`auto` 直接生效或 `review` 待确认）。远程 `yingce-agent` 调用失败绝不回退本地 embedded，避免已执行工具副作用被重复触发。详见 [Agent 与部署](./agent-and-deployment.mdx)。
 
-### 短剧制作
+### 4.4 短剧自动化制作与分池调度
 
-`原文 → 作品设定与分集 → 镜头脚本 → 剧情段提示词 → 用户放行 → 段视频 → 时间线成片`。
+`章节原文/剧本/分镜导入 → 作品圣经（bible）与分批拆集（plan） → 镜头脚本与台词核对 → 按模型能力与单段目标时长（4–15s）切分 DramaSegment → 段提示词（可挂载单轮写作技能） → 样片/每集审阅与媒体放行 → 段视频生成与循环外后台尾帧抽取 → 时间线成片合成与剪映草稿导出`。
 
-DramaJob 描述业务步骤，Task 描述一次可调度执行，DramaSegment 是视频生成单位。模型输出须解析为领域对象；业务调度器从数据库状态推导下一步，不依赖浏览器一直开着。详见短剧专题。
+`DramaJob` 表达业务步骤，派发时才创建通用 `Task`。调度器按文字（`text`）、参考图（`image`）、段视频（`video`）、成片（`render`）四个独立并发池统计在途数，按“先集号、同集内成片 > 剧本 > 提示词 > 视频”排序派发；耗时的尾帧下载与 ffmpeg 抽帧交由 `drama_tail_worker.go` 在主循环外异步完成。详见 [短剧制作](./production.mdx)。
 
-### 资源身份与分发
+### 4.5 电商 Agent 五步策划与行业知识库
 
-`Resource 身份 → 当前存储位置/变体 → 用户或场景授权 → 临时访问描述 → 浏览器或上游取用`。
+`商品图与资料输入 → 识图理解与卖点提取 → 行业分类祖先匹配离线知识包（ecommerceknowledge）与平台排版安全规范（platform_knowledge.json） → 风格方向推荐 → 逐屏策划方案审阅 → 批量提交通用生成任务出图/出片`。
 
-长期引用保存资源 ID；临时签名 URL 不应充当稳定身份。数据库备份不含全部媒体对象；缓存命中也不能代替授权。删除 Outbox 提交只表示清理已排队，不证明物理文件已经消失。
+电商策划与识图阶段使用的模型及思考等级由后台 `EcommerceAgentSetting` 权威绑定，`CreateTask` 准入时校验客户端提交是否与后台阶段模型一致并强制覆盖 `thinkingLevel`，防止绕过管理员配置。详见 [Agent 与部署](./agent-and-deployment.mdx#6-电商-agent-与行业知识库架构)。
+
+### 4.6 资源身份、方舟素材库与分级分发
+
+`Resource 稳定身份 / 方舟 asset:// 认证素材 / 姿势库模板 → 归属、有效期与场景授权校验 → 派生平台代理、源站或 CDN 临时签名 URL → 浏览器展示或上游模型拉取`。
+
+长期业务数据只保存 `resourceId` 或受管 `asset://` 引用，不把短期签名 URL 当作持久化主键。素材删除通过事务写入 `ResourceDeletionJob` Outbox，由后台 Worker 幂等清理物理对象。详见 [后端与任务](./backend.mdx#9-资源身份访问交付与方舟姿势库)。
 
 ## 5. 数据所有权与一致性
 
-| 数据 | 权威来源 | 其他副本/投影 | 关键注意点 |
+| 数据域 | 权威来源 | 其他副本或投影 | 关键一致性规则 |
 | --- | --- | --- | --- |
-| 账号与权限 | 服务端身份及业务归属 | 前端会话和功能隐藏 | 前端守卫不是授权结论 |
-| 画布编辑 | 本地工作状态与已确认服务端版本 | scoped localforage、实时 presence | 未确认保存、冲突、临时光标分开处理 |
-| 生成任务 | 数据库 Task/Result、租约和执行诊断 | 查询缓存、SSE 文本增量 | SSE 结束或浏览器 abort 不等于任务取消 |
-| 模型产物 | Resource 状态和实际对象 | CDN、播放副本、浏览器缓存 | 上游成功与平台回存分开 |
-| Agent | run、审批、事件、Pi JSONL 与 checkpoint | UI 消息与模型上下文 | JSONL 与语义摘要不是同一个状态载体 |
-| 短剧 | Production/Episode/Segment/Job | 制作台、精修画布、渲染计划 | 同步任务结果后再决定派发 |
-| 费用 | 预留、订单、核对记录 | 报价和 UI 显示 | 不确定提交不能一律退款或自动重发 |
+| 账号、权限与配额 | 服务端会话、用户组、存储配额与资源归属校验 | 前端路由守卫、按钮显隐 | 前端守卫仅用于体验，所有读写删均在 `app`/领域层按 `userID` 强校验 |
+| 画布编辑与实时状态 | 服务端已确认 `revision` + 本地未确认 mutation journal | `localforage` 快照、WebSocket 临时光标与拖拽框 | 实时 Presence 不落库；Agent patch 必须满足 `revision = baseRevision + 1` |
+| 生成任务与文本流 | 数据库 `Task`/`TaskResult`、租约 owner 与 `TaskTextDelta` | React Query 缓存、SSE 增量流 | 每次执行后写回均经 `taskLeaseWriter` 校验当前租约；SSE 断开不等于取消任务 |
+| 模型媒体产物 | `Resource` 表状态（`pending/ready/failed`）与底层存储对象 | 播放转码副本、CDN 缓存、浏览器 Blob 缓存 | 上游生成成功与平台落盘分开记录；落盘失败保留 `MediaRecoveryJSON` 供重试保存 |
+| 云端 Agent 与记忆 | `CloudAgentRun`、审批记录、`SessionJSONL`、`Checkpoint`、`AgentMemoryDocument` | 聊天面板消息、本机发送队列 outbox | `SessionJSONL` 绑定 `expectedRevision` 条件更新；`Checkpoint` 严格限制 64 KiB 且历史视为不可信数据 |
+| 短剧制作 | `DramaProduction`、`DramaCast`、`DramaEpisode`、`DramaShot`、`DramaSegment`、`DramaJob`、`DramaTake` | 制作台视图、精修画布节点、时间线渲染计划 | 制作花费按计费订单（含流水线与精修画布）汇总；精修画布产物须显式采用才写回短剧 |
+| 电商工作区 | `EcommerceProject`（`revision`、`Draft`、`Plan`）、离线知识包与行业分类树 | 浏览器五步工作区草稿、同商品历史记录 | 保存校验 `revision`；识图与策划阶段模型及思考等级由服务端后台配置强制约束 |
+| 积分与计费 | 预留记录、计费订单（含 Token 分时/上下文档位与参考视频快照）、结算/待核对账单 | 前端报价估算与钱包展示 | 明确未发出的失败可自动退回预留；上游状态不明的请求进入账单核对，不盲目退款或重发 |
 
-## 6. 已发现的约定与实现差异
+## 6. 已核实的约定与实现差异
 
-这些是文档核验发现，不是本次修复或变更授权。详细证据在各专题中。
+以下差异来自源码逐行核对，供开发与排障参考：
 
-| 容易误读的说法 | 当前实现 |
+| 常见印象或历史描述 | 当前代码真实实现 |
 | --- | --- |
-| Redis 是持久任务队列 | Task 表与租约驱动调度；Redis 做协调，也承载部分实时分发 |
-| 后端 service 层另有业务实现 | service 主要是 app 的稳定别名导入面 |
-| 任何资源有引用都不能删除 | 普通删除保护引用；purge/归档路径有不同规则，物理删除走 Outbox |
-| 所有失败原样保留 AppError | `POST /tasks` 仍有 `fail(400, err)` 调用点 |
-| 所有出站仅能精确放行私网 | 普通出站仍读取遗留全局开关；自定义渠道更严格 |
-| 编辑器已拆成八个独立插件 | 当前 `editor-shell` 单插件提供八个插槽；旧时间线还有浏览器导出路径 |
-| 文档站可独立构建 | 当前缺少 docs 的 package 和配置，不能执行旧说明中的构建命令 |
+| Redis 是持久化任务队列 | 数据库 `Task` 表与租约字段驱动调度；Redis 承担全局并发槽、限流、熔断、路由健康与画布实时房间广播 |
+| `internal/service` 包含独立业务逻辑 | `internal/service` 是 `internal/app` 的类型与函数别名稳定导出层（`aliases_*.go`），组合根在 `internal/app` |
+| 所有接口错误都已走 `failService` 保留 `AppError` | `POST /api/tasks` 在 `CreateTask` 返回错误时仍调用 `fail(c, http.StatusBadRequest, err)`（见 `handler/routes.go:49-51`） |
+| 任何被画布或任务引用的素材都无法删除 | 普通非归档删除会拦截引用并返回占用来源；但 `purge=true` 彻底删除及部分归档清理允许忽略任务/画布引用，且物理文件经 Outbox 异步删除 |
+| 所有出站请求都彻底移除了私网全局放行开关 | 自定义渠道中转（`/api/ai/custom`）严格忽略全局开关，仅認精确白名单；普通上游出站仍读取遗留的 `CANVAS_ALLOW_PRIVATE_UPSTREAMS` |
+| 编辑器已拆分为 8 个可独立安装的插件包 | 当前由单个内建 v2 插件 `editor-shell.tsx` 一次性注册 8 个编辑器插槽；且画布弹窗仍保留浏览器 `ffmpeg.wasm` 导出入口与后端渲染任务并存 |
+| 短剧尾帧在 `tickDrama` 循环内同步下载抽取 | 已迁出主循环，由 `drama_tail_worker.go` 按视频资源加租约在后台异步抽取（单进程并发 4），主循环遇到抽取中仅标记 `dramaPendingTail` |
+| `docs/` 下包含可运行的 Next.js 文档站工程 | 当前仓库仅保留 `docs/content/docs/` 下的 MDX 源文档、`docs/design/` 与 `docs/architecture/`，无 `docs/package.json` 或 `docs/source.config.ts` |
 
-## 7. 维护与验证
+## 7. 维护与验证纪律
 
-新功能变更时，先更新对应专题的真实调用链与状态合同，再改 JSON 图表规格。不要直接修改生成 HTML；重新 validate、deliver、visual-check，并复核截图，更新哈希回执。
+修改架构、任务协议、数据库表或 Agent 工具链时：
 
-本次验证针对文档附件和链接，未启动开发服务器、数据库、模型或容器。没有运行产品全量测试；没有执行生产部署。登录隔离、SSE 重连、多实例租约、媒体恢复和升级回滚仍须在相应环境验收。待确认项记录在 [待测试](../progress/pending-test.mdx)。
+1. 先核对真实入口、调用方、事务边界与相邻测试，同步更新本目录下的对应专题文档及 [代码功能地图](../backend/code-map.mdx)、[HTTP API 合同](../backend/http-api.mdx) 或 [后端数据库](../backend/backend-database.mdx)。
+2. 若拓扑或时序发生变化，更新 `docs/architecture/diagrams/` 下的 `.json` 或 `.archify.md` 规格，使用 Archify 3.2 `finalize` 重新生成 HTML 与验证回执，切勿手工编辑生成的 HTML。
+3. 推送前在仓库根目录运行 `bun scripts/verify-before-push.mjs` 完成与改动范围匹配的本地并行检查；尚未在真实环境确认的改动写入 [待测试清单](../progress/pending-test.mdx)。

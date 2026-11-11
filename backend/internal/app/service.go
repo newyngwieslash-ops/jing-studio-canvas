@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -77,6 +79,11 @@ type Service struct {
 	concurrencyReadCache     *platform.BoundedReadCache[string, platform.RuntimeTaskPolicy]
 	textReplayReadCache      *platform.BoundedReadCache[textReplayCacheKey, *TextReplayResult]
 	routeVersionReadCache    *platform.BoundedReadCache[string, int64]
+	authSessionCache         *platform.BoundedReadCache[string, cachedAuthSession]
+	authLocalSeq             atomic.Uint64
+	authRevocationMu         sync.Mutex
+	revokedSessions          map[string]time.Time
+	revokedUsersAt           map[string]authUserRevocationEntry
 	geminiCacheLocks         map[string]*geminiCacheKeyLock
 	routeCatalogRetryAt      time.Time
 	routeCatalogRefreshError error
@@ -87,6 +94,8 @@ type Service struct {
 	sms                      *sms.Service
 	canvas                   *canvas.Service
 	canvasRealtime           *canvas.RealtimeHub
+	wakeHub                  *platform.WakeHub
+	wakeClosed               bool
 	workbench                *workbench.Service
 	poseLibrary              *poselibrary.Service
 	inspirationFeed          *inspirations.Service
@@ -95,6 +104,7 @@ type Service struct {
 	piRunners                map[string]context.CancelFunc
 	// piRunnerRestarts 记录审批恢复时旧会话仍在收尾的运行，旧会话退出后再启动一次。
 	piRunnerRestarts map[string]struct{}
+	piCancelSubStop  func()
 	piRunnersClosed  bool
 	disablePiRuntime bool
 	// legacyCloudAgentRootTask is enabled only by tests that exercise the pre-Pi
@@ -124,6 +134,13 @@ type Service struct {
 	// dramaTails 跟踪调度循环之外的尾帧抽取；dramaBackgroundRunner 为空时用后台 worker，测试替换为同步执行。
 	dramaTails            dramaTailWorker
 	dramaBackgroundRunner func(fn func()) bool
+	transcodeSem          chan struct{}
+	transcodeMu           sync.Mutex
+	transcodeCtx          context.Context
+	transcodeCancel       context.CancelFunc
+	transcodeClosed       bool
+	transcodeWg           sync.WaitGroup
+	transcodeRunner       func(ctx context.Context, src string, dst string) error
 }
 
 const taskWorkerConcurrency = 3
@@ -162,7 +179,8 @@ func New(repo *repository.Repository, dataDir string) *Service {
 func newService(repo *repository.Repository, dataDir string) *Service {
 	coordinator, err := platform.NewCoordinator(repo.Dialect())
 	canvasRealtime := canvas.NewRealtimeHub(coordinator.Redis())
-	repo = repo.WithCanvasChangeNotifier(canvasRealtime.Changed)
+	wakeHub := platform.NewWakeHub(coordinator.Redis())
+	repo = repo.WithCanvasChangeNotifier(canvasRealtime.Changed).WithWakeNotifier(wakeHub.Notify)
 	pluginRuntime, pluginRuntimeErr := newPluginRuntime(dataDir)
 	paymentRegistry, _ := payment.NewRegistry()
 	if pluginRuntime != nil {
@@ -170,7 +188,8 @@ func newService(repo *repository.Repository, dataDir string) *Service {
 			paymentRegistry = dynamic
 		}
 	}
-	service := &Service{repo: repo, dataDir: dataDir, activeStorageTests: make(map[string]bool), activeCancels: make(map[string]context.CancelFunc), agentConflictStreak: make(map[string]int), agentSchedulerWake: make(chan struct{}, 1), taskDispatcherWake: make(chan struct{}, 1), piRunners: make(map[string]context.CancelFunc), coordinator: coordinator, runtimeErr: err, pluginRuntime: pluginRuntime, pluginRuntimeErr: pluginRuntimeErr, paymentRegistry: paymentRegistry, workerID: newID(), routeCatalogTTL: 30 * time.Second, routeCatalogMaxStale: 5 * time.Minute, routeHealthBlocked: make(map[string]time.Time), geminiCacheLocks: make(map[string]*geminiCacheKeyLock)}
+	transcodeCtx, transcodeCancel := context.WithCancel(context.Background())
+	service := &Service{repo: repo, dataDir: dataDir, activeStorageTests: make(map[string]bool), activeCancels: make(map[string]context.CancelFunc), agentConflictStreak: make(map[string]int), agentSchedulerWake: make(chan struct{}, 1), taskDispatcherWake: make(chan struct{}, 1), piRunners: make(map[string]context.CancelFunc), coordinator: coordinator, runtimeErr: err, pluginRuntime: pluginRuntime, pluginRuntimeErr: pluginRuntimeErr, paymentRegistry: paymentRegistry, workerID: newID(), routeCatalogTTL: 30 * time.Second, routeCatalogMaxStale: 5 * time.Minute, routeHealthBlocked: make(map[string]time.Time), geminiCacheLocks: make(map[string]*geminiCacheKeyLock), wakeHub: wakeHub, transcodeSem: make(chan struct{}, parseTranscodeConcurrency(os.Getenv(transcodeConcurrencyEnv))), transcodeCtx: transcodeCtx, transcodeCancel: transcodeCancel}
 	service.taskBillingCoordinator = newTaskBillingCoordinator(service.repo)
 	service.taskTerminalCoordinator = newTaskTerminalCoordinator(service)
 	service.taskRouteExecutor = newTaskRouteExecutor(service)
@@ -216,6 +235,7 @@ func (s *Service) StartWorker() {
 	s.startDramaScheduler()
 	s.startInspirationFeedWorker()
 	s.startConsumptionReportWorker()
+	s.ensureCloudAgentCancelSubscriber()
 	go s.syncAgentSessionLimit()
 	s.runWorkerLoop(func(ctx context.Context) {
 		ticker := time.NewTicker(3 * time.Second)
@@ -246,7 +266,12 @@ func (s *Service) syncAgentSessionLimit() {
 
 func (s *Service) BeginDrain() { s.backgroundWorkers().BeginDrain() }
 
-func (s *Service) StopWorker(ctx context.Context) error { return s.backgroundWorkers().Stop(ctx) }
+func (s *Service) StopWorker(ctx context.Context) error {
+	s.cancelPlaybackTranscodes()
+	workerErr := s.backgroundWorkers().Stop(ctx)
+	transcodeErr := s.waitPlaybackTranscodes(ctx)
+	return errors.Join(workerErr, transcodeErr)
+}
 
 func (s *Service) IsDraining() bool { return s.backgroundWorkers().IsDraining() }
 

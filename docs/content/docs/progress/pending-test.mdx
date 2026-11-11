@@ -5,6 +5,28 @@ description: 当前项目已实现功能的手工验证清单与未确认边界
 
 # 待测试
 
+## SaaS 多副本高可用与核心热路径性能优化
+
+- 已实现（多副本高可用 HA-1 ~ HA-3）：小影 Agent 桥接地址支持 `YINGCE_AGENT_BRIDGE_HOST=auto` 自动探测容器非回环内网 IP，配合 `agent-run:<runID>` Redis 分布式执行租约、续租失败自熔断及跨实例取消 Pub/Sub，避免多副本回调错投与同轮次重复恢复；新增 `CANVAS_REQUIRE_OBJECT_STORAGE` 生产启动门禁，本地 `ffmpeg` 播放副本转码增加 `CANVAS_TRANSCODE_CONCURRENCY` 有界信号量与同目录临时文件原子落盘；`yingce-agent` 增加一次性隔离预热子进程池（`YINGCE_AGENT_WARM_POOL_SIZE`）并在生产编排默认启用双副本。
+- 已实现（热路径性能优化 P0 ~ P2）：渠道出站代理改为有界 LRU `http.Transport` 连接池复用，并合并 SSRF 校验与拨号为单次 DNS 解析多 IP 顺序回退；`CurrentUser` 增加 3 秒有界读缓存与跨副本无时钟偏斜会话瞬时吊销，`ResourceAccessBatch` 与 `UserAssetsPage` 改为批量查库消除百节点画布 N+1；画布协作 `RealtimeHub` 按房间多路复用单条 Redis Pub/Sub 订阅，新增 `WakeHub` 在数据库事务提交后事件驱动唤醒文本与小影 SSE 流，PostgreSQL 连接池参数支持环境变量配置；`VariantThumbnail` 对阿里云 OSS、腾讯云 COS、七牛 Kodo 时间窗对齐直签 640px WebP 缩略图并附带 `originalWidth` / `originalHeight` 保持画布节点原始比例；Nginx 网关启用 `backend_upstream` `keepalive 64` 长连接池且保留 WebSocket 升级头；新增 Schema 94 `idx_tasks_active_claim` 活跃任务部分索引，并将生产编排默认并发调优为 Worker `16`、渠道 `10`、单用户活跃任务 `4`（可通过后台「资源与请求策略」覆盖）。
+- 本地验证：`internal/agent/runtime`、`internal/outbound`、`internal/assets`、`internal/canvas`、`internal/database`、`internal/platform`、`internal/storage`、`internal/hostupdate`、`internal/repository`（纯 Go SQLite 领取执行计划专项）、`yingce-agent` Node 测试与 Nginx keepalive 配置契约测试通过；未在真实多副本生产集群、真实 PostgreSQL/Redis/PgBouncer 与云存储 CDN 环境下执行压测与联调。
+- [ ] 多副本小影 Agent 验收：启动 ≥2 个 `backend` 与 ≥2 个 `yingce-agent` 副本，发起多轮工具调用、审批暂停与跨副本取消，确认 `/model` `/tool` `/event` 回调无 502、同一 `runID` 不被双副本重入、取消信号跨实例即时生效。
+- [ ] 对象存储门禁与转码限流验收：`CANVAS_REQUIRE_OBJECT_STORAGE=true` 且未启用平台对象存储时启动明确拒绝；高并发视频播放副本转码下 `ffmpeg` 进程数严格受限于 `CANVAS_TRANSCODE_CONCURRENCY`。
+- [ ] 鉴权吊销与画布批量加载验收：双副本下禁用账号或登出会话后另一副本立即拦截请求；含 100+ 图片节点的画布打开时批量签发请求耗时与 SQL 次数符合预期。
+- [ ] 实时流与数据库连接池验收：多标签页进入同一协作画布时 Redis Pub/Sub 订阅数按房间收敛；文本生成与小影对话 SSE 首包无轮询延迟；压测核对多副本 PostgreSQL 连接水位与 PgBouncer 兼容性。
+- [ ] 云端缩略图与 CDN 验收：阿里云 OSS、腾讯云 COS、七牛 Kodo 下画布图片节点实际请求 640px WebP 缩略图且 CDN 二次命中正常，节点宽高比例与原图一致；下载与查看原图仍走 `original`。
+- [ ] Nginx 长连接与大表调度验收：检查 Nginx 到 `backend` 内网连接复用无大量 `TIME_WAIT` 且协作 WebSocket 正常；在含大量历史终态记录的 PostgreSQL `tasks` 表上执行 `EXPLAIN (ANALYZE, BUFFERS)` 确认 `ClaimNextTask` 命中 `idx_tasks_active_claim`。
+- 已知边界：未内置图片处理查询协议的标准 S3 / TOS / MinIO 存储继续安全回退 `actualVariant="original"`；本地转码信号量为单进程边界，多副本生产应开启平台对象存储与 CDN；环境变量并发阈值仅作用于未在后台固化自定义策略的默认基线。
+
+## 短剧制作：角色人脸参考生成参考图
+
+- 已实现：角色详情新增「人脸参考」（上传 / 素材库 / 清除），接口 `PUT /dramas/:id/cast/:castId/face`，新列 `drama_casts.face_resource_id`（Schema 92）。设置后解锁角色并重新生成参考图：以人脸参考为参考图1做 `image_to_image`，提示词要求五官、脸型、肤色与之一致，服装、发型、妆容按外貌描述与参考图方案，不照搬参考图的衣着和背景。造型仍以角色本体参考图为底图，因而沿用同一张脸。原有「上传形象图」（直接采用并锁定）不变。
+- 本地验证：`go test ./internal/app -run "TestDramaCastFaceReference|TestDramaCastLookLifecycle"` 通过；未在浏览器中验收。
+- [ ] 浏览器验收：给一个角色上传人脸照，确认角色自动解锁、参考图进入生成中、生成结果是本剧画风与服装但脸与照片一致；旧图在版本记录里。清除后再点「重新生成」，回到纯文字生成。
+- [ ] 造型：设置人脸参考并生成角色参考图后，逐个点造型的重新生成，确认造型沿用新脸。
+- [ ] 所选角色图像模型不支持图生图或上游拒绝真人人脸时，失败原因显示在待处理里。
+- 已知边界：设置人脸参考不会自动重做已有造型；一个角色只有一张人脸参考，造型不能单独指定。
+
 ## 短剧制作：新建页右侧选择单段时长（15 秒 / 30 秒）
 
 - 已实现：`/projects/new` 右侧新增「单段时长」（智能 / 15 秒 / 30 秒），只写 `settings.storyboard`：15、30 秒为 `segmentMode: "range"`、`segmentMaxSeconds` 取该秒数，最短夹到不超过上限；智能为 `segmentMode: "auto"` 并保留数值。中间栏「分镜规则」配成其他值时显示「自定义」。后端、剧本提示词与切段算法未改，仍由 `StoryboardSettings.SegmentLimits` 按视频模型上限收紧。

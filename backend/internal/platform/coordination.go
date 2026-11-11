@@ -22,9 +22,8 @@ type localRateEntry struct {
 }
 
 const (
-	MinChannelConcurrencyLimit     = 1
-	MaxChannelConcurrencyLimit     = maxRuntimeConcurrency
-	defaultChannelConcurrencyValue = 8
+	MinChannelConcurrencyLimit = 1
+	MaxChannelConcurrencyLimit = maxRuntimeConcurrency
 )
 
 type channelSlotError struct {
@@ -197,6 +196,8 @@ func (c *Coordinator) AcquireLease(ctx context.Context, scope string, limit int,
 
 const CoordinationTimeout = 2 * time.Second
 
+var ErrSlotLeaseExpired = errors.New("并发租约已失效")
+
 type SlotLease struct {
 	coordinator *Coordinator
 	scope       string
@@ -231,7 +232,7 @@ func (l *SlotLease) Renew(ctx context.Context) error {
 		c.localMu.Lock()
 		defer c.localMu.Unlock()
 		if !c.localSlots[l.scope][l.token].After(now) {
-			return errors.New("并发租约已失效")
+			return ErrSlotLeaseExpired
 		}
 		c.localSlots[l.scope][l.token] = now.Add(l.ttl)
 		return nil
@@ -243,7 +244,7 @@ func (l *SlotLease) Renew(ctx context.Context) error {
 		return err
 	}
 	if ok != 1 {
-		return errors.New("并发租约已失效")
+		return ErrSlotLeaseExpired
 	}
 	return nil
 }
@@ -382,18 +383,11 @@ func envInt(key string, fallback int) int {
 }
 
 func defaultWorkerConcurrencyLimit() int {
-	return envInt("CANVAS_WORKER_CONCURRENCY", defaultWorkerConcurrency)
+	return min(envInt("CANVAS_WORKER_CONCURRENCY", defaultWorkerConcurrency), maxRuntimeConcurrency)
 }
 
 func defaultChannelConcurrencyLimit() int {
-	return envInt("CANVAS_CHANNEL_CONCURRENCY", defaultChannelConcurrencyValue)
-}
-
-func effectiveChannelConcurrencyLimit(configured int) int {
-	if configured < MinChannelConcurrencyLimit || configured > MaxChannelConcurrencyLimit {
-		return defaultChannelConcurrencyLimit()
-	}
-	return configured
+	return min(envInt("CANVAS_CHANNEL_CONCURRENCY", defaultChannelConcurrency), maxRuntimeConcurrency)
 }
 
 func (s *Service) AcquireChannelSlot(ctx context.Context, channelID string, fallbackScope string, ttl time.Duration) (func(), int, error) {

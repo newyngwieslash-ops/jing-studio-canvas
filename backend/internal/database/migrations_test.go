@@ -2,6 +2,7 @@ package database
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -927,5 +928,193 @@ func TestToolsUpgradeFromMain29PreservesMigrationChecksums(t *testing.T) {
 	}
 	if !db.Migrator().HasTable(&model.Tool{}) || !db.Migrator().HasTable(&model.ToolFavorite{}) {
 		t.Fatal("tools tables missing")
+	}
+}
+
+func TestMigrateSchemaRepairsLegacyDramaCastFaceMigrationVersion(t *testing.T) {
+	db, err := Open(Config{Driver: "sqlite", DSN: "file:migration-legacy-v92-drama-face?mode=memory&cache=shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database that had applied drama_cast_face_reference at v92 before merging upstream v92 (drama_reference_controls).
+	if err := db.Where("version >= ?", 92).Delete(&schemaMigration{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, drop := range []struct {
+		entity any
+		field  string
+	}{
+		{&model.DramaCast{}, "ImagePrompt"},
+		{&model.DramaSegment{}, "ReferenceImagesJSON"},
+		{&model.DramaSegment{}, "AudioCastIDsJSON"},
+	} {
+		if err := db.Migrator().DropColumn(drop.entity, drop.field); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacyTime := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	if err := db.Create(&schemaMigration{
+		Version:   92,
+		Name:      dramaCastFaceMigrationName,
+		Checksum:  legacyDramaCastFaceMigrationChecksum,
+		AppliedAt: legacyTime,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MigrateSchema(db); err != nil {
+		t.Fatalf("migrate from legacy v92 drama_cast_face_reference: %v", err)
+	}
+	status, err := ReadSchemaStatus(db)
+	if err != nil || !status.Ready || status.Current != CurrentSchemaVersion {
+		t.Fatalf("unexpected schema status after normalizing legacy v92: %+v, %v", status, err)
+	}
+	for _, check := range []struct {
+		entity any
+		field  string
+	}{
+		{&model.DramaCast{}, "ImagePrompt"},
+		{&model.DramaCast{}, "FaceResourceID"},
+		{&model.DramaSegment{}, "ReferenceImagesJSON"},
+		{&model.DramaSegment{}, "AudioCastIDsJSON"},
+	} {
+		if !db.Migrator().HasColumn(check.entity, check.field) {
+			t.Fatalf("missing column %s after normalizing legacy v92", check.field)
+		}
+	}
+	var v93 schemaMigration
+	if err := db.First(&v93, "version = ?", 93).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !v93.AppliedAt.Equal(legacyTime) {
+		t.Fatalf("expected v93 applied_at %v, got %v", legacyTime, v93.AppliedAt)
+	}
+}
+
+func TestMigrateTasksActiveClaimPartialIndex(t *testing.T) {
+	db, err := Open(Config{Driver: "sqlite", DSN: "file:migration-tasks-active-claim?mode=memory&cache=shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	if CurrentSchemaVersion != 94 {
+		t.Fatalf("CurrentSchemaVersion = %d, want 94", CurrentSchemaVersion)
+	}
+	status, err := ReadSchemaStatus(db)
+	if err != nil || !status.Ready || status.Current != 94 {
+		t.Fatalf("unexpected schema status: %+v, err = %v", status, err)
+	}
+
+	var count int64
+	if err := db.Raw("SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'tasks' AND name = 'idx_tasks_active_claim'").Scan(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("idx_tasks_active_claim count = %d, want 1", count)
+	}
+
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	activeLease := now.Add(10 * time.Minute)
+	futurePoll := now.Add(10 * time.Minute)
+	fixtures := make([]model.Task, 0, 404)
+	for i := range 300 {
+		st := model.TaskStatusSucceeded
+		switch i % 3 {
+		case 1:
+			st = model.TaskStatusFailed
+		case 2:
+			st = model.TaskStatusCancelled
+		}
+		fixtures = append(fixtures, model.Task{
+			ID:        fmt.Sprintf("hist-%d", i),
+			UserID:    "u1",
+			Status:    st,
+			CreatedAt: now.Add(-time.Duration(500-i) * time.Second),
+		})
+	}
+	fixtures = append(fixtures,
+		model.Task{ID: "queued-ready", UserID: "u1", Status: model.TaskStatusQueued, CreatedAt: now.Add(-110 * time.Second)},
+	)
+	for i := range 100 {
+		if i%2 == 0 {
+			fixtures = append(fixtures, model.Task{
+				ID:             fmt.Sprintf("active-running-%d", i),
+				UserID:         "u1",
+				Status:         model.TaskStatusRunning,
+				LeaseOwner:     "worker-live",
+				LeaseExpiresAt: &activeLease,
+				CreatedAt:      now.Add(-time.Duration(105-i) * time.Second),
+			})
+		} else {
+			fixtures = append(fixtures, model.Task{
+				ID:         fmt.Sprintf("active-queued-%d", i),
+				UserID:     "u1",
+				Status:     model.TaskStatusQueued,
+				NextPollAt: &futurePoll,
+				CreatedAt:  now.Add(-time.Duration(105-i) * time.Second),
+			})
+		}
+	}
+	if err := db.CreateInBatches(&fixtures, 200).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("ANALYZE").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	type queryPlanRow struct {
+		ID      int
+		Parent  int
+		NotUsed int
+		Detail  string
+	}
+	var plan []queryPlanRow
+	explainSQL := `EXPLAIN QUERY PLAN
+SELECT * FROM tasks
+WHERE status IN ('queued', 'running')
+  AND (status = ? OR (status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))
+  AND (next_poll_at IS NULL OR next_poll_at <= ?)
+ORDER BY created_at ASC
+LIMIT 1`
+	if err := db.Raw(explainSQL, model.TaskStatusQueued, model.TaskStatusRunning, now, now).Scan(&plan).Error; err != nil {
+		t.Fatal(err)
+	}
+	usedPartialIndex := false
+	var details []string
+	for _, row := range plan {
+		details = append(details, row.Detail)
+		if strings.Contains(row.Detail, "idx_tasks_active_claim") {
+			usedPartialIndex = true
+		}
+		if strings.Contains(row.Detail, "USE TEMP B-TREE FOR ORDER BY") {
+			t.Fatalf("expected ordered index scan without temp B-tree sort, got plan: %v", details)
+		}
+	}
+	if !usedPartialIndex {
+		t.Fatalf("expected EXPLAIN QUERY PLAN to use idx_tasks_active_claim, got: %v", details)
+	}
+
+	// Simulate upgrading an existing v93 database to v94 and verify idempotency.
+	if err := db.Exec("DROP INDEX IF EXISTS idx_tasks_active_claim").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("version = ?", 94).Delete(&schemaMigration{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := MigrateSchema(db); err != nil {
+			t.Fatalf("upgrade/idempotent MigrateSchema: %v", err)
+		}
+	}
+	if err := db.Raw("SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'tasks' AND name = 'idx_tasks_active_claim'").Scan(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("idx_tasks_active_claim count after upgrade = %d, want 1", count)
 	}
 }

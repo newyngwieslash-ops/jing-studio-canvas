@@ -1,12 +1,22 @@
 {
   "schema_version": 1, "diagram_type": "sequence",
-  "meta": { "title": "影策 · 生成任务与结果回读", "locale": "zh-CN", "quality_profile": "showcase", "column_fit": "spread", "viewBox": [1080, 530] },
+  "meta": {
+    "title": "影策 · 生成任务与结果回读",
+    "output": "docs/architecture/diagrams/generation.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/newyngwieslash-ops/jing-studio-canvas.git",
+      "revision": "6ab49b692d6ebfd267826d7117f11100f8128af0",
+      "link_mode": "local-only"
+    }
+  },
   "participants": [
-    { "id": "canvas", "type": "frontend", "label": "创作前端", "sublabel": "生成任务消费者" },
-    { "id": "task-api", "type": "backend", "label": "任务 API", "sublabel": "身份与业务校验" },
-    { "id": "task-store", "type": "database", "label": "任务数据库", "sublabel": "状态与租约" },
-    { "id": "task-worker", "type": "backend", "label": "任务 Worker", "sublabel": "进程内执行" },
-    { "id": "upstream", "type": "external", "label": "模型上游", "sublabel": "协议适配" }
+    { "id": "canvas", "type": "frontend", "label": "创作前端", "sublabel": "生成任务消费者", "sources": [{ "path": "web/src/services/generation-task-materializer.ts", "line": 67, "end_line": 89 }] },
+    { "id": "task-api", "type": "backend", "label": "任务 API", "sublabel": "身份与业务校验", "sources": [{ "path": "backend/internal/handler/routes.go", "line": 30, "end_line": 54 }] },
+    { "id": "task-store", "type": "database", "label": "任务数据库", "sublabel": "状态与租约", "sources": [{ "path": "backend/internal/repository/repository_tasks.go", "line": 53, "end_line": 101 }] },
+    { "id": "task-worker", "type": "backend", "label": "任务 Worker", "sublabel": "进程内执行", "sources": [{ "path": "backend/internal/app/task_worker.go", "line": 49, "end_line": 100 }] },
+    { "id": "upstream", "type": "external", "label": "模型上游", "sublabel": "协议适配", "sources": [{ "path": "backend/internal/app/provider.go", "line": 21, "end_line": 50 }] }
   ],
   "messages": [
     { "id": "submit", "from": "canvas", "to": "task-api", "y": 160, "label": "提交生成任务", "variant": "emphasis" },

@@ -56,14 +56,36 @@ func (s *Service) UserAssetsPage(userID string, page int, pageSize int, filter U
 	if err != nil {
 		return UserAssetPage{}, err
 	}
-	rawAssets := make([]json.RawMessage, 0, len(assets))
+	type preparedAssetPayload struct {
+		asset   model.Asset
+		payload json.RawMessage
+	}
+	prepared := make([]preparedAssetPayload, 0, len(assets))
+	var characterAssets []model.Asset
 	for _, asset := range assets {
 		payload := clientAssetListPayload(asset)
 		if len(payload) == 0 {
 			continue
 		}
 		if asset.Kind == "entity" && asset.Category == model.AssetCategoryCharacter {
-			payload = s.characterAssetListPayload(userID, asset, payload)
+			characterAssets = append(characterAssets, asset)
+		}
+		prepared = append(prepared, preparedAssetPayload{asset: asset, payload: payload})
+	}
+	var cardsByAssetID map[string]CharacterCardSummary
+	if len(characterAssets) > 0 {
+		cardsByAssetID, err = s.characterCardsForAssets(userID, characterAssets)
+		if err != nil {
+			return UserAssetPage{}, err
+		}
+	}
+	rawAssets := make([]json.RawMessage, 0, len(prepared))
+	for _, item := range prepared {
+		payload := item.payload
+		if item.asset.Kind == "entity" && item.asset.Category == model.AssetCategoryCharacter {
+			if card, ok := cardsByAssetID[item.asset.ID]; ok {
+				payload = encodeCharacterAssetListPayload(card, payload)
+			}
 		}
 		rawAssets = append(rawAssets, payload)
 	}
@@ -77,14 +99,10 @@ func (s *Service) UserAssetsPage(userID string, page int, pageSize int, filter U
 	}, nil
 }
 
-// characterAssetListPayload 给素材库里的角色卡补上当前版本的形象与声音。
+// encodeCharacterAssetListPayload 给素材库里的角色卡补上当前版本的形象与声音。
 // 角色资产的 payload 只存设定，形象/声音在版本表里；不补的话列表卡片和档案只能显示空图标。
 // 只下发 resource: 存储键，展示时由前端换取授权地址，不经后端中转字节。
-func (s *Service) characterAssetListPayload(userID string, asset model.Asset, raw json.RawMessage) json.RawMessage {
-	card, err := s.characterCard(userID, &asset)
-	if err != nil {
-		return raw
-	}
+func encodeCharacterAssetListPayload(card CharacterCardSummary, raw json.RawMessage) json.RawMessage {
 	var payload map[string]any
 	if err := json.Unmarshal(raw, &payload); err != nil || payload == nil {
 		return raw

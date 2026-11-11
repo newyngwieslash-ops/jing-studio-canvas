@@ -2,19 +2,23 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-
-	"errors"
+	"strconv"
 	"strings"
+	"sync"
 
 	"yingce/backend/internal/model"
+	"yingce/backend/internal/storage"
 )
 
 // 播放副本转码：HEVC/H.265 原片在 Chrome/Firefox 等无法解码（<video> 黑屏），
@@ -27,15 +31,181 @@ import (
 var ErrPlaybackNotReady = errors.New("播放副本尚未就绪")
 
 const (
-	playbackDirName         = "playback"
-	videoCodecH264          = "h264"
-	videoCodecH265          = "h265"
-	videoCodecAV1           = "av1"
-	videoCodecVP9           = "vp9"
-	videoCodecMPEG4         = "mpeg4"
-	probeMaxMoovSize        = 128 << 20
-	playbackPersistAttempts = 3
+	playbackDirName             = "playback"
+	videoCodecH264              = "h264"
+	videoCodecH265              = "h265"
+	videoCodecAV1               = "av1"
+	videoCodecVP9               = "vp9"
+	videoCodecMPEG4             = "mpeg4"
+	probeMaxMoovSize            = 128 << 20
+	playbackPersistAttempts     = 3
+	transcodeConcurrencyEnv     = "CANVAS_TRANSCODE_CONCURRENCY"
+	defaultTranscodeConcurrency = 1
+	maxTranscodeConcurrency     = 4
 )
+
+func parseTranscodeConcurrency(raw string) int {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return defaultTranscodeConcurrency
+	}
+	n, err := strconv.Atoi(trimmed)
+	if err != nil || n <= 0 {
+		return defaultTranscodeConcurrency
+	}
+	if n > maxTranscodeConcurrency {
+		return maxTranscodeConcurrency
+	}
+	return n
+}
+
+func ffmpegExecutable() string {
+	if configured := strings.TrimSpace(os.Getenv(renderFfmpegEnv)); configured != "" {
+		return configured
+	}
+	return "ffmpeg"
+}
+
+func (s *Service) ensureTranscodeContextLocked() context.Context {
+	if s.transcodeCtx == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		if s.transcodeClosed {
+			cancel()
+		}
+		s.transcodeCtx = ctx
+		s.transcodeCancel = cancel
+	}
+	return s.transcodeCtx
+}
+
+func (s *Service) transcodeContext() context.Context {
+	if s == nil {
+		return context.Background()
+	}
+	s.transcodeMu.Lock()
+	defer s.transcodeMu.Unlock()
+	return s.ensureTranscodeContextLocked()
+}
+
+func (s *Service) isTranscodeClosed() bool {
+	if s == nil {
+		return false
+	}
+	s.transcodeMu.Lock()
+	defer s.transcodeMu.Unlock()
+	return s.transcodeClosed
+}
+
+func (s *Service) enterPlaybackTranscode() (context.Context, func(), bool) {
+	if s == nil {
+		return context.Background(), func() {}, true
+	}
+	s.transcodeMu.Lock()
+	defer s.transcodeMu.Unlock()
+	ctx := s.ensureTranscodeContextLocked()
+	if s.transcodeClosed {
+		return ctx, func() {}, false
+	}
+	s.transcodeWg.Add(1)
+	return ctx, s.transcodeWg.Done, true
+}
+
+func (s *Service) cancelPlaybackTranscodes() {
+	if s == nil {
+		return
+	}
+	s.transcodeMu.Lock()
+	s.transcodeClosed = true
+	_ = s.ensureTranscodeContextLocked()
+	if s.transcodeCancel != nil {
+		s.transcodeCancel()
+	}
+	s.transcodeMu.Unlock()
+}
+
+func (s *Service) waitPlaybackTranscodes(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.cancelPlaybackTranscodes()
+	done := make(chan struct{})
+	go func() {
+		s.transcodeWg.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		<-done
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) closePlaybackTranscodes() {
+	if s == nil {
+		return
+	}
+	s.cancelPlaybackTranscodes()
+	s.transcodeWg.Wait()
+}
+
+func (s *Service) acquireTranscodeSlot(ctx context.Context) (func(), bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil, false
+	}
+	if s == nil || s.transcodeSem == nil {
+		if s != nil && s.transcodeContext().Err() != nil {
+			return nil, false
+		}
+		return func() {}, true
+	}
+	svcCtx := s.transcodeContext()
+	if svcCtx.Err() != nil {
+		return nil, false
+	}
+	select {
+	case <-ctx.Done():
+		return nil, false
+	case <-svcCtx.Done():
+		return nil, false
+	case s.transcodeSem <- struct{}{}:
+		if ctx.Err() != nil || svcCtx.Err() != nil {
+			<-s.transcodeSem
+			return nil, false
+		}
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-s.transcodeSem
+			})
+		}, true
+	}
+}
+
+// ValidateSaaSStorageReadiness 校验多副本 SaaS 部署的对象存储就绪状态。
+func (s *Service) ValidateSaaSStorageReadiness(requireObjectStorage bool) error {
+	if !requireObjectStorage {
+		return nil
+	}
+	if s == nil || s.repo == nil {
+		return errors.New("已启用 CANVAS_REQUIRE_OBJECT_STORAGE，但存储仓库尚未初始化")
+	}
+	setting, err := s.activeOSSSetting()
+	if err != nil {
+		return fmt.Errorf("已启用 CANVAS_REQUIRE_OBJECT_STORAGE，SaaS 多副本模式必须在后台配置并启用可用的平台对象存储（OSS/COS/S3/TOS/Kodo）：%w", err)
+	}
+	if !storage.CDNEnabled(setting) && !storage.PublicOrigin(setting) {
+		slog.Warn("saas object storage has neither public CDN nor public HTTPS origin; media delivery may proxy through backend", "provider", setting.Provider)
+	}
+	return nil
+}
 
 // probeVideoCodec 解析本地 mp4 的 stsd 首个视频 sample entry fourcc，返回 h264/h265 等。
 // 非 mp4 容器或解析失败返回空串（调用方按“无需转码”处理，前端仍可用原件）。
@@ -163,6 +333,9 @@ func (s *Service) maybeStartPlaybackTranscode(resource *model.Resource) {
 	if resource == nil || resource.Kind != "video" {
 		return
 	}
+	if s.isTranscodeClosed() {
+		return
+	}
 	// 远端存储（OSS 等）不落本地副本：标 none 表示无需转码，前端按原生播放/直链处理，
 	// 避免状态留空被当成 processing 无限轮询（markPlaybackNone 幂等）。
 	if resource.Provider != "local" || resource.Status != model.ResourceStatusReady {
@@ -176,9 +349,11 @@ func (s *Service) maybeStartPlaybackTranscode(resource *model.Resource) {
 	}
 	// 不可转码场景（无 ffmpeg）落 none：状态为空会被前端当成 processing 无限轮询，
 	// 也会让启动回填每次重试探测。none 表示"无需转码"，按原生播放处理。
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		markPlaybackNone(s, resource)
-		return
+	if s == nil || s.transcodeRunner == nil {
+		if _, err := exec.LookPath(ffmpegExecutable()); err != nil {
+			markPlaybackNone(s, resource)
+			return
+		}
 	}
 	src := filepath.Join(s.dataDir, "resources", filepath.FromSlash(resource.ObjectKey))
 	switch probeVideoCodec(src) {
@@ -188,12 +363,20 @@ func (s *Service) maybeStartPlaybackTranscode(resource *model.Resource) {
 		// （转码失败会落 failed，前端据此显示终止性错误，不再出现死循环）。
 		// 原子抢占（空/none → processing）：并发上传 + 回填、多实例同抢时
 		// 仅一个能成功置位，其余直接返回，避免重复转码。
+		ctx, done, ok := s.enterPlaybackTranscode()
+		if !ok {
+			return
+		}
 		claimed, err := s.repo.ClaimPlaybackTranscode(resource.ID)
 		if err != nil || !claimed {
+			done()
 			return
 		}
 		resource.PlaybackStatus = model.PlaybackStatusProcessing
-		go s.runPlaybackTranscode(resource.UserID, resource.ID, src)
+		go func() {
+			defer done()
+			s.runPlaybackTranscodeWithContext(ctx, resource.UserID, resource.ID, src)
+		}()
 	case videoCodecH264, videoCodecAV1, videoCodecVP9, "":
 		// H.264 浏览器可直接解码；AV1/VP9 现代浏览器可直接解码，均不需转码；
 		// 探针读不出编码（非 mp4 / moov 在尾部 / 加密容器）也无法处理 —— 均标 none，
@@ -216,6 +399,19 @@ func markPlaybackNone(s *Service, resource *model.Resource) {
 
 // runPlaybackTranscode 转码本地原件到 playback/<id>.mp4 并回写状态（幂等按 id 重载）。
 func (s *Service) runPlaybackTranscode(userID string, resourceID string, src string) {
+	ctx, done, ok := s.enterPlaybackTranscode()
+	if !ok {
+		s.requeueCanceledPlaybackTranscode(userID, resourceID)
+		return
+	}
+	defer done()
+	s.runPlaybackTranscodeWithContext(ctx, userID, resourceID, src)
+}
+
+func (s *Service) runPlaybackTranscodeWithContext(ctx context.Context, userID string, resourceID string, src string) {
+	if s == nil || s.repo == nil {
+		return
+	}
 	// 转码 goroutine 意外 panic 时把状态落 failed，避免 processing 卡死到下次重启。
 	defer func() {
 		if r := recover(); r != nil {
@@ -226,15 +422,32 @@ func (s *Service) runPlaybackTranscode(userID string, resourceID string, src str
 			}
 		}
 	}()
+
+	release, ok := s.acquireTranscodeSlot(ctx)
+	if !ok {
+		s.requeueCanceledPlaybackTranscode(userID, resourceID)
+		return
+	}
+	defer release()
+
 	status := model.PlaybackStatusFailed
 	objectKey := ""
 	var errText string
 	dst := filepath.Join(s.dataDir, playbackDirName, resourceID+".mp4")
+	transcode := runH264Transcode
+	if s.transcodeRunner != nil {
+		transcode = s.transcodeRunner
+	}
 	// 副本已存在且为 H.264（上次转码完成但回写随进程崩溃丢失）：直接置 ready 不重转。
 	if probeVideoCodec(dst) == videoCodecH264 {
 		status = model.PlaybackStatusReady
 		objectKey = resourceID + ".mp4"
-	} else if err := runH264Transcode(src, dst); err != nil {
+	} else if err := transcode(ctx, src, dst); err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			_ = os.Remove(dst)
+			s.requeueCanceledPlaybackTranscode(userID, resourceID)
+			return
+		}
 		errText = clipText(err.Error(), 1000)
 	} else {
 		status = model.PlaybackStatusReady
@@ -249,6 +462,24 @@ func (s *Service) runPlaybackTranscode(userID string, resourceID string, src str
 	res.PlaybackObjectKey = objectKey
 	res.PlaybackError = errText
 	_ = persistPlaybackResource(s.repo, res, "transcode_complete")
+}
+
+func (s *Service) requeueCanceledPlaybackTranscode(userID string, resourceID string) {
+	if s == nil || s.repo == nil {
+		return
+	}
+	res, err := s.repo.ResourceForUser(userID, resourceID)
+	if err != nil || res == nil {
+		log.Printf("playback transcode cancel reset skipped: resource=%s user=%s lookup_error=%v", resourceID, userID, err)
+		return
+	}
+	if res.PlaybackStatus != model.PlaybackStatusProcessing {
+		return
+	}
+	res.PlaybackStatus = ""
+	res.PlaybackObjectKey = ""
+	res.PlaybackError = ""
+	_ = persistPlaybackResource(s.repo, res, "transcode_canceled")
 }
 
 type resourcePersister interface {
@@ -268,16 +499,25 @@ func persistPlaybackResource(saver resourcePersister, resource *model.Resource, 
 }
 
 // runH264Transcode 用 ffmpeg 将任意输入转为 H.264/AAC mp4（faststart、yuv420p、偶数尺寸）。
-func runH264Transcode(src string, dst string) error {
+// 先写入确定的临时路径 dst+".tmp.mp4"，成功且未取消后再原子重命名为 dst，避免进程硬终止或
+// +faststart 二次挪移中途失败留下 moov 可解析但残缺的半成品被重启回填误判为 ready。
+func runH264Transcode(ctx context.Context, src string, dst string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return err
 	}
-	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+	tmpDst := dst + ".tmp.mp4"
+	_ = os.Remove(tmpDst)
+	defer func() { _ = os.Remove(tmpDst) }()
+
+	cmd := exec.CommandContext(ctx, ffmpegExecutable(), "-hide_banner", "-loglevel", "error", "-y",
 		"-i", src,
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
 		"-pix_fmt", "yuv420p", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
 		"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-		dst)
+		tmpDst)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -286,6 +526,12 @@ func runH264Transcode(src string, dst string) error {
 			msg = err.Error()
 		}
 		return fmt.Errorf("ffmpeg 转码失败：%s", clipText(msg, 800))
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpDst, dst); err != nil {
+		return err
 	}
 	return nil
 }
@@ -327,16 +573,33 @@ func (s *Service) OpenResourcePlaybackRange(userID string, resourceID string) (*
 // 有界重判（见 PlaybackNoneVideos）。幂等：maybeStartPlaybackTranscode 先置
 // processing/none 再入库，重复扫描不会重复转码。
 func (s *Service) BackfillPlaybackTranscodes() {
+	if s == nil || s.repo == nil || s.isTranscodeClosed() {
+		return
+	}
 	// 上次进程可能崩溃在转码中途（状态卡 processing），先重置为待判定。
 	_ = s.repo.ResetStuckPlaybackTranscodes()
-	for {
+	for !s.isTranscodeClosed() {
 		resources, err := s.repo.PlaybackPendingVideos(20)
 		if err != nil || len(resources) == 0 {
 			break
 		}
+		progressed := false
 		for i := range resources {
+			if s.isTranscodeClosed() {
+				return
+			}
+			before := resources[i].PlaybackStatus
 			s.maybeStartPlaybackTranscode(&resources[i])
+			if resources[i].PlaybackStatus != before {
+				progressed = true
+			}
 		}
+		if !progressed {
+			break
+		}
+	}
+	if s.isTranscodeClosed() {
+		return
 	}
 	// 旧版本曾把 H.265/MPEG-4 Part 2 误判为浏览器可播并落 none；对存量 none 行
 	// 做一次有界重判（H.264 保持 none，H.265/MPEG-4 Part 2 触发转码），使 codec
@@ -345,6 +608,9 @@ func (s *Service) BackfillPlaybackTranscodes() {
 	legacy, err := s.repo.PlaybackNoneVideos(20)
 	if err == nil {
 		for i := range legacy {
+			if s.isTranscodeClosed() {
+				return
+			}
 			s.maybeStartPlaybackTranscode(&legacy[i])
 		}
 	}

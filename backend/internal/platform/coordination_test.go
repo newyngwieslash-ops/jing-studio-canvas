@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -23,8 +24,8 @@ func TestRuntimeCoordinatorLeaseRenewsAndCannotResurrect(t *testing.T) {
 		t.Fatalf("capacity exceeded: %v %v", ok, err)
 	}
 	c.localSlots["workers"][lease.Token()] = time.Now().Add(-time.Second)
-	if err := lease.Renew(context.Background()); err == nil {
-		t.Fatal("expired lease resurrected")
+	if err := lease.Renew(context.Background()); !errors.Is(err, ErrSlotLeaseExpired) {
+		t.Fatalf("expired lease renew err = %v, want ErrSlotLeaseExpired", err)
 	}
 	replacement, acquired, err := c.AcquireLease(context.Background(), "workers", 1, time.Minute)
 	if err != nil || !acquired {

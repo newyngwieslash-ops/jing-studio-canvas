@@ -22,6 +22,7 @@ type (
 	UpdateDramaEpisodeRequest     = app.UpdateDramaEpisodeRequest
 	InsertDramaShotRequest        = app.InsertDramaShotRequest
 	SetDramaCastImageRequest      = app.SetDramaCastImageRequest
+	SetDramaCastFaceRequest       = app.SetDramaCastFaceRequest
 	AdoptDramaSegmentVideoRequest = app.AdoptDramaSegmentVideoRequest
 	DramaCanvasAssetsRequest      = app.DramaCanvasAssetsRequest
 	DramaArchive                  = app.DramaArchive

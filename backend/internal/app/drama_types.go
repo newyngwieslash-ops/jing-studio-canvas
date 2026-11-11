@@ -368,6 +368,13 @@ type SetDramaCastImageRequest struct {
 	TaskID string `json:"taskId"`
 }
 
+// SetDramaCastFaceRequest 为角色本体指定人脸参考图（ResourceID 为空表示清除）。
+// 指定后解锁并重新生成参考图：五官以这张图为准，服装、发型与妆容按外貌描述和参考图方案。
+type SetDramaCastFaceRequest struct {
+	ResourceID      string `json:"resourceId"`
+	RestyleSegments bool   `json:"restyleSegments"`
+}
+
 // AdoptDramaSegmentVideoRequest 把画布上的视频采用为剧情段当前视频。
 type AdoptDramaSegmentVideoRequest struct {
 	ResourceID string `json:"resourceId"`
@@ -488,6 +495,8 @@ type DramaInboxItem struct {
 	EpisodeNumber int    `json:"episodeNumber,omitempty"`
 	SegmentIndex  int    `json:"segmentIndex"`
 	Media         string `json:"media,omitempty"`
+	// Recoverable 表示参考图已生成但保存失败，可以重新保存（不重新生成、不重复扣费）。
+	Recoverable bool `json:"recoverable,omitempty"`
 }
 
 type DramaJobView struct {

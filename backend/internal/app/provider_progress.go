@@ -24,7 +24,9 @@ func (s *Service) syncProviderTaskProgress(taskID string, responseBody []byte) {
 	}
 	if err := s.repo.UpdateTaskProviderProgress(taskID, progress); err != nil {
 		log.Printf("provider progress sync failed: task_id=%s error=%v", taskID, err)
+		return
 	}
+	s.notifyWakeFallback("task-text:" + taskID)
 }
 
 func providerProgressFromResponse(responseBody []byte) (int, bool) {

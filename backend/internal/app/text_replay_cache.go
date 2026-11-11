@@ -19,7 +19,12 @@ func (s *Service) initReadCaches() {
 		s.concurrencyReadCache = platform.NewBoundedReadCache[string, platform.RuntimeTaskPolicy](1, 1024, 1, 2*time.Second)
 		s.textReplayReadCache = platform.NewBoundedReadCache[textReplayCacheKey, *TextReplayResult](256, 8<<20, 8, 750*time.Millisecond)
 		s.routeVersionReadCache = platform.NewBoundedReadCache[string, int64](1, 1024, 1, 250*time.Millisecond)
+		s.authSessionCache = platform.NewBoundedReadCache[string, cachedAuthSession](4096, 4<<20, 32, authSessionCacheTTL)
 	})
+}
+
+func (s *Service) ensureReadCaches() {
+	s.initReadCaches()
 }
 
 // SSE 展示专用，不用于写路径和权限决策；userID 进入 key，回源仍检查任务归属。
@@ -49,4 +54,15 @@ func (s *Service) CachedTaskTextReplay(ctx context.Context, userID, taskID strin
 	copy := *value
 	copy.Deltas = append([]model.TaskTextDelta(nil), value.Deltas...)
 	return &copy, nil
+}
+
+// FreshTaskTextReplay bypasses and evicts any cached entry for (userID, taskID, after)
+// so event-driven SSE wakeups always observe freshly committed deltas and status transitions.
+func (s *Service) FreshTaskTextReplay(ctx context.Context, userID, taskID string, after int64) (*TextReplayResult, error) {
+	s.initReadCaches()
+	s.textReplayReadCache.Delete(textReplayCacheKey{userID, taskID, after})
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	reader := &Service{repo: s.repo.WithContext(ctx)}
+	return reader.TaskTextReplay(userID, taskID, after)
 }

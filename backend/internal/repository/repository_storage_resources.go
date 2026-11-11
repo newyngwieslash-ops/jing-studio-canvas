@@ -197,6 +197,15 @@ func (r *Repository) ResourceForUser(userID string, id string) (*model.Resource,
 	return &resource, nil
 }
 
+func (r *Repository) ResourcesForUserByIDs(userID string, ids []string) ([]model.Resource, error) {
+	if userID == "" || len(ids) == 0 {
+		return nil, nil
+	}
+	var resources []model.Resource
+	err := r.db.Where("user_id = ? AND id IN ?", userID, ids).Find(&resources).Error
+	return resources, err
+}
+
 func (r *Repository) Resources(userID string, limit int) ([]model.Resource, error) {
 	var resources []model.Resource
 	if limit <= 0 || limit > 500 {

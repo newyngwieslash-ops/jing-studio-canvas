@@ -707,10 +707,137 @@ func (s *Service) characterCardVersion(userID string, version *model.AssetVersio
 	if err != nil {
 		return CharacterCardSummary{}, err
 	}
+	var profile *model.VoiceProfile
+	binding, bindingErr := s.repo.CharacterVoiceBinding(version.ID)
+	if bindingErr == nil && binding != nil {
+		loadedProfile, profileErr := s.repo.VoiceProfileForUser(userID, binding.VoiceProfileID)
+		if profileErr == nil {
+			profile = loadedProfile
+		}
+	} else if !errors.Is(bindingErr, gorm.ErrRecordNotFound) {
+		return CharacterCardSummary{}, bindingErr
+	} else {
+		binding = nil
+	}
+	return buildCharacterCardSummary(*version, definition, stored, binding, profile), nil
+}
+
+func (s *Service) characterCardsForAssets(userID string, assets []model.Asset) (map[string]CharacterCardSummary, error) {
+	versionIDs := make([]string, 0, len(assets))
+	seenVersionIDs := make(map[string]struct{}, len(assets))
+	for _, asset := range assets {
+		if asset.Kind != "entity" || asset.Category != model.AssetCategoryCharacter || asset.PrimaryVersionID == "" {
+			continue
+		}
+		if _, seen := seenVersionIDs[asset.PrimaryVersionID]; !seen {
+			seenVersionIDs[asset.PrimaryVersionID] = struct{}{}
+			versionIDs = append(versionIDs, asset.PrimaryVersionID)
+		}
+	}
+	if len(versionIDs) == 0 {
+		return map[string]CharacterCardSummary{}, nil
+	}
+
+	versions, err := s.repo.AssetVersionsByIDs(versionIDs)
+	if err != nil {
+		return nil, err
+	}
+	versionByID := make(map[string]model.AssetVersion, len(versions))
+	definitionByVersionID := make(map[string]map[string]any, len(versions))
+	validVersionIDs := make([]string, 0, len(versions))
+	for _, version := range versions {
+		definition := map[string]any{}
+		if err := json.Unmarshal([]byte(version.DefinitionJSON), &definition); err != nil {
+			continue
+		}
+		versionByID[version.ID] = version
+		definitionByVersionID[version.ID] = definition
+		validVersionIDs = append(validVersionIDs, version.ID)
+	}
+	if len(validVersionIDs) == 0 {
+		return map[string]CharacterCardSummary{}, nil
+	}
+
+	representations, err := s.repo.AssetRepresentationsByVersionIDs(validVersionIDs)
+	if err != nil {
+		return nil, err
+	}
+	repsByVersionID := make(map[string][]model.AssetRepresentation, len(validVersionIDs))
+	for _, rep := range representations {
+		repsByVersionID[rep.AssetVersionID] = append(repsByVersionID[rep.AssetVersionID], rep)
+	}
+
+	bindings, err := s.repo.CharacterVoiceBindingsByVersionIDs(validVersionIDs)
+	if err != nil {
+		return nil, err
+	}
+	bindingByVersionID := make(map[string]*model.CharacterVoiceBinding, len(bindings))
+	profileIDs := make([]string, 0, len(bindings))
+	seenProfileIDs := make(map[string]struct{}, len(bindings))
+	for i := range bindings {
+		b := &bindings[i]
+		bindingByVersionID[b.AssetVersionID] = b
+		if b.VoiceProfileID != "" {
+			if _, seen := seenProfileIDs[b.VoiceProfileID]; !seen {
+				seenProfileIDs[b.VoiceProfileID] = struct{}{}
+				profileIDs = append(profileIDs, b.VoiceProfileID)
+			}
+		}
+	}
+
+	var profileByID map[string]*model.VoiceProfile
+	if len(profileIDs) > 0 {
+		profiles, err := s.repo.VoiceProfilesForUserByIDs(userID, profileIDs)
+		if err != nil {
+			return nil, err
+		}
+		profileByID = make(map[string]*model.VoiceProfile, len(profiles))
+		for i := range profiles {
+			profileByID[profiles[i].ID] = &profiles[i]
+		}
+	}
+
+	cards := make(map[string]CharacterCardSummary, len(assets))
+	for _, asset := range assets {
+		if asset.Kind != "entity" || asset.Category != model.AssetCategoryCharacter {
+			continue
+		}
+		version, ok := versionByID[asset.PrimaryVersionID]
+		if !ok {
+			continue
+		}
+		binding := bindingByVersionID[version.ID]
+		var profile *model.VoiceProfile
+		if binding != nil && profileByID != nil {
+			profile = profileByID[binding.VoiceProfileID]
+		}
+		cards[asset.ID] = buildCharacterCardSummary(
+			version,
+			definitionByVersionID[version.ID],
+			repsByVersionID[version.ID],
+			binding,
+			profile,
+		)
+	}
+	return cards, nil
+}
+
+func buildCharacterCardSummary(
+	version model.AssetVersion,
+	definition map[string]any,
+	stored []model.AssetRepresentation,
+	binding *model.CharacterVoiceBinding,
+	profile *model.VoiceProfile,
+) CharacterCardSummary {
 	representations := make([]CharacterRepresentationSummary, 0, len(stored))
 	roles := make(map[string]bool, len(stored))
 	for _, representation := range stored {
-		representations = append(representations, CharacterRepresentationSummary{ID: representation.ID, ResourceID: representation.ResourceID, MediaType: representation.MediaType, Role: representation.Role})
+		representations = append(representations, CharacterRepresentationSummary{
+			ID:         representation.ID,
+			ResourceID: representation.ResourceID,
+			MediaType:  representation.MediaType,
+			Role:       representation.Role,
+		})
 		roles[representation.Role] = true
 	}
 	visualStatus := "missing"
@@ -722,19 +849,23 @@ func (s *Service) characterCardVersion(userID string, version *model.AssetVersio
 	}
 	var voice *CharacterVoiceSummary
 	voiceStatus := "missing"
-	binding, bindingErr := s.repo.CharacterVoiceBinding(version.ID)
-	if bindingErr == nil && binding != nil {
-		profile, profileErr := s.repo.VoiceProfileForUser(userID, binding.VoiceProfileID)
-		if profileErr == nil && profile != nil && profile.Status == "active" {
+	if binding != nil {
+		if profile != nil && profile.Status == "active" {
 			voice = &CharacterVoiceSummary{Profile: voiceProfileSummary(*profile), Instructions: binding.Instructions}
 			voiceStatus = "ready"
 		} else {
 			voiceStatus = "unavailable"
 		}
-	} else if !errors.Is(bindingErr, gorm.ErrRecordNotFound) {
-		return CharacterCardSummary{}, bindingErr
 	}
-	return CharacterCardSummary{VersionID: version.ID, Version: version.Version, Definition: definition, Representations: representations, Voice: voice, VisualStatus: visualStatus, VoiceStatus: voiceStatus}, nil
+	return CharacterCardSummary{
+		VersionID:       version.ID,
+		Version:         version.Version,
+		Definition:      definition,
+		Representations: representations,
+		Voice:           voice,
+		VisualStatus:    visualStatus,
+		VoiceStatus:     voiceStatus,
+	}
 }
 
 func (s *Service) characterAssetDetail(userID string, asset *model.Asset) (CharacterAssetSummary, error) {

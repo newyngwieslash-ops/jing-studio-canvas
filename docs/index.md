@@ -4,12 +4,12 @@
 
 ## 架构与技术原理
 
-- [架构总览](content/docs/architecture/index.mdx)：系统边界、数据与调用合同、关键实现差异和阅读路线。
-- [前端架构](content/docs/architecture/frontend.mdx)：画布、账号隔离、同步、生成交付、编辑器与插件。
-- [后端与任务](content/docs/architecture/backend.mdx)：数据库队列、租约、模型协议、SSE、资源与安全。
-- [Agent 与部署](content/docs/architecture/agent-and-deployment.mdx)：Pi 回调、审批暂停和续跑、检查点、六服务部署与更新器。
-- [短剧制作](content/docs/architecture/production.mdx)：作品、分集、剧情段、调度与精修画布。
-- [Archify 图表及验证记录](architecture/README.md)：系统架构图、生成时序图、Agent 审批时序图、JSON 规格和哈希回执。
+- [架构总览](content/docs/architecture/index.mdx)：系统边界、六条核心技术链、数据所有权、实现差异和阅读路线。
+- [前端架构](content/docs/architecture/frontend.mdx)：画布、实时协作、账号隔离、生成物化、电商与图片工作台、3D 预演与时间线插件。
+- [后端与任务](content/docs/architecture/backend.mdx)：准入与思考等级、数据库租约队列、声明式协议宿主、视频参考计费、SSE、资源分发与方舟/姿势库。
+- [Agent 与部署](content/docs/architecture/agent-and-deployment.mdx)：Pi 三条回调桥、29 项工具策略、批量生成与试跑、长期记忆、电商 Agent 知识库、六服务部署与更新器。
+- [短剧制作](content/docs/architecture/production.mdx)：作品、分集、剧情段、四类并发池调度、后台尾帧抽取、单段目标时长、剪映导出与精修画布。
+- [Archify 图表与一页式解说页](architecture/README.md)：一页式 Explainer、系统架构图、生成时序图、Agent 审批时序图、规格与验证回执。
 
 ## 部署与更新入口
 
@@ -79,6 +79,7 @@
 功能、代码地图、待办、待测试分别维护在以下页面；尚未建立的专题会在对应任务中补齐：
 
 - [AI 审美批改画布插件](content/docs/plugins/ai-art-critique.mdx)
+- [视频生成前故事板与预演操作指南](content/docs/canvas/video-storyboard-preview.mdx)
 - [功能](content/docs/overview/features.mdx)
 - [本地开发](content/docs/backend/local-development.mdx)
 - [HTTP API 合同](content/docs/backend/http-api.mdx)

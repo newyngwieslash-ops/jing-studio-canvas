@@ -1,14 +1,24 @@
 {
   "schema_version": 1, "diagram_type": "architecture",
-  "meta": { "title": "影策 · 系统架构", "locale": "zh-CN", "quality_profile": "showcase", "repository": { "url": "https://github.com/newyngwieslash-ops/jing-studio-canvas.git", "revision": "21adab22d65c6cf572f9fd6a910b459c82051c53", "link_mode": "local-only" } },
+  "meta": {
+    "title": "影策 · 系统架构",
+    "output": "docs/architecture/diagrams/system.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/newyngwieslash-ops/jing-studio-canvas.git",
+      "revision": "6ab49b692d6ebfd267826d7117f11100f8128af0",
+      "link_mode": "local-only"
+    }
+  },
   "components": [
-    { "id": "workbench", "type": "frontend", "label": "创作工作台", "sublabel": "React · 画布与项目", "pos": [40, 300], "size": [180, 80], "sources": [{ "path": "web/src/application.tsx" }] },
-    { "id": "web-gateway", "type": "cloud", "label": "Web 入口", "sublabel": "Nginx · 静态资源", "pos": [330, 300], "size": [180, 80], "sources": [{ "path": "nginx.conf" }] },
-    { "id": "business-api", "type": "backend", "label": "业务与任务服务", "sublabel": "Go · Gin · Worker", "pos": [620, 300], "size": [200, 80], "sources": [{ "path": "backend/cmd/server/main.go" }] },
-    { "id": "model-upstream", "type": "external", "label": "模型上游", "sublabel": "文本 · 图片 · 音视频", "pos": [1000, 300], "size": [190, 80], "sources": [{ "path": "backend/internal/app/provider.go" }] },
+    { "id": "workbench", "type": "frontend", "label": "创作工作台", "sublabel": "React · 画布与项目", "pos": [40, 300], "size": [180, 80], "sources": [{ "path": "web/src/application.tsx", "line": 20, "end_line": 26 }] },
+    { "id": "web-gateway", "type": "cloud", "label": "Web 入口", "sublabel": "Nginx · 静态资源", "pos": [330, 300], "size": [180, 80], "sources": [{ "path": "nginx.conf", "line": 10, "end_line": 151 }] },
+    { "id": "business-api", "type": "backend", "label": "业务与任务服务", "sublabel": "Go · Gin · Worker", "pos": [620, 300], "size": [200, 80], "sources": [{ "path": "backend/cmd/server/main.go", "line": 42, "end_line": 120 }] },
+    { "id": "model-upstream", "type": "external", "label": "模型上游", "sublabel": "文本 · 图片 · 音视频", "pos": [1000, 300], "size": [190, 80], "sources": [{ "path": "backend/internal/app/provider.go", "line": 21, "end_line": 100 }] },
     { "id": "browser-cache", "type": "database", "label": "浏览器缓存", "sublabel": "localforage · 用户隔离", "pos": [40, 60], "size": [180, 80], "sources": [{ "path": "web/package.json" }] },
-    { "id": "business-db", "type": "database", "label": "业务数据库", "sublabel": "PostgreSQL / SQLite", "pos": [620, 60], "size": [200, 80], "sources": [{ "path": "backend/cmd/server/main.go" }] },
-    { "id": "pi-runtime", "type": "backend", "label": "Agent 运行时", "sublabel": "Node pi · 回调 Go", "pos": [620, 560], "size": [200, 80], "sources": [{ "path": "docker-compose.deploy.yml" }] }
+    { "id": "business-db", "type": "database", "label": "业务数据库", "sublabel": "PostgreSQL / SQLite", "pos": [620, 60], "size": [200, 80], "sources": [{ "path": "backend/cmd/server/main.go", "line": 47, "end_line": 74 }] },
+    { "id": "pi-runtime", "type": "backend", "label": "Agent 运行时", "sublabel": "Node pi · 回调 Go", "pos": [620, 560], "size": [200, 80], "sources": [{ "path": "docker-compose.deploy.yml", "line": 41, "end_line": 55 }] }
   ],
   "connections": [
     { "id": "browser-http", "from": "workbench", "to": "web-gateway", "label": "HTTP", "variant": "emphasis" },

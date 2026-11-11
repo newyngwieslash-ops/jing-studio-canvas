@@ -1688,11 +1688,22 @@ func (r *dramaRun) submitCastImage(job *model.DramaJob) (*model.Task, bool, erro
 		baseImage = base
 		operation = "image_to_image"
 	}
+	// 参考图1：造型用角色本体参考图；角色本体有人脸参考时用人脸参考，五官以它为准、造型仍按设定。
+	referenceID := ""
+	if baseImage != nil {
+		referenceID = baseImage.ImageResourceID
+	} else if cast.Kind == "character" && cast.FaceResourceID != "" {
+		referenceID = cast.FaceResourceID
+		operation = "image_to_image"
+	}
 	// 画风与画面规则写的是成片画幅，设定图有自己的画幅：带入前去掉其中的画幅与横竖构图要求，
 	// 设定和方案模板的文字不动。
 	stylePrompt := production.StripFrameDirectives(r.settings.StylePrompt)
 	visualRules := production.StripFrameDirectives(r.meta.VisualRules)
 	prompt := production.CastImagePrompt(assets, cast.Kind, cast.Name, appearance, stylePrompt, visualRules)
+	if baseImage == nil && referenceID != "" {
+		prompt = "参考图1是角色" + cast.Name + "的人脸参考。保持五官、脸型、肤色与参考图1一致；服装、发型、妆容、姿态与背景按以下设定生成，不照搬参考图1的衣着和背景。\n" + prompt
+	}
 	if baseImage != nil {
 		prompt = "参考图1是角色" + cast.Name + "的既有形象。保持五官、脸型、体态与参考图1完全一致。" + firstNonEmpty(strings.TrimSpace(cast.ImagePrompt), "只把造型改为："+appearance+"。"+stylePrompt)
 	}
@@ -1713,8 +1724,8 @@ func (r *dramaRun) submitCastImage(job *model.DramaJob) (*model.Task, bool, erro
 	config := map[string]any{"count": "1"}
 	request.apply(config)
 	input := map[string]any{"config": config, "metadata": metadata}
-	if baseImage != nil {
-		ref, refErr := r.s.dramaResourceReference(baseImage.ImageResourceID, "参考图1", "reference_image")
+	if referenceID != "" {
+		ref, refErr := r.s.dramaResourceReference(referenceID, "参考图1", "reference_image")
 		if refErr != nil {
 			return nil, false, refErr
 		}

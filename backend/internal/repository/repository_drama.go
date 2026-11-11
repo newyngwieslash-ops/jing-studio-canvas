@@ -611,6 +611,16 @@ func (r *Repository) LatestDramaJob(projectID string, kind string, episodeID str
 	return &job, nil
 }
 
+// LatestDramaCastJob 取某个设定最近一次参考图作业。
+func (r *Repository) LatestDramaCastJob(projectID string, castID string) (*model.DramaJob, error) {
+	var job model.DramaJob
+	err := r.db.Where("project_id = ? AND kind = ? AND cast_id = ?", projectID, model.DramaJobCastImage, castID).Order("created_at desc").First(&job).Error
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 func (r *Repository) RecentDramaJobs(projectID string, limit int) ([]model.DramaJob, error) {
 	var jobs []model.DramaJob
 	err := r.db.Where("project_id = ?", projectID).Order("updated_at desc").Limit(limit).Find(&jobs).Error

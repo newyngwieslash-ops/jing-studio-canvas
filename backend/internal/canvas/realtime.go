@@ -47,10 +47,23 @@ type realtimeEnvelope struct {
 
 // Presence is ephemeral; cursor and drag messages never enter the database.
 type RealtimeHub struct {
-	mu    sync.Mutex
-	rooms map[string]map[string]*RealtimeSession
-	redis *redis.Client
-	id    string
+	mu     sync.Mutex
+	rooms  map[string]map[string]*RealtimeSession
+	relays map[string]*roomRelay
+	closed bool
+	redis  *redis.Client
+	id     string
+}
+
+type roomRelay struct {
+	hub     *RealtimeHub
+	room    string
+	refs    int
+	ready   chan struct{}
+	initErr error
+	ctx     context.Context
+	cancel  context.CancelFunc
+	pubsub  *redis.PubSub
 }
 
 type RealtimeSession struct {
@@ -61,43 +74,168 @@ type RealtimeSession struct {
 	Events chan RealtimeEvent
 	ctx    context.Context
 	cancel context.CancelFunc
-	pubsub *redis.PubSub
+	relay  *roomRelay
 	once   sync.Once
 }
 
 func NewRealtimeHub(client *redis.Client) *RealtimeHub {
-	return &RealtimeHub{rooms: make(map[string]map[string]*RealtimeSession), redis: client, id: kernel.NewID()}
+	return &RealtimeHub{
+		rooms:  make(map[string]map[string]*RealtimeSession),
+		relays: make(map[string]*roomRelay),
+		redis:  client,
+		id:     kernel.NewID(),
+	}
 }
 
 func realtimeRoom(userID, canvasID string) string {
 	return "canvas:realtime:v1:" + base64.RawURLEncoding.EncodeToString([]byte(userID)) + ":" + base64.RawURLEncoding.EncodeToString([]byte(canvasID))
 }
 
+func (h *RealtimeHub) acquireRoomRelay(ctx context.Context, room string) (*roomRelay, error) {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return nil, errors.New("实时通知服务已关闭")
+	}
+	relay := h.relays[room]
+	first := false
+	if relay == nil {
+		relayCtx, relayCancel := context.WithCancel(context.Background())
+		relay = &roomRelay{
+			hub:    h,
+			room:   room,
+			refs:   1,
+			ready:  make(chan struct{}),
+			ctx:    relayCtx,
+			cancel: relayCancel,
+		}
+		h.relays[room] = relay
+		first = true
+	} else {
+		relay.refs++
+	}
+	h.mu.Unlock()
+
+	if first {
+		pubsub := h.redis.Subscribe(relay.ctx, room)
+		readyCtx, stop := context.WithTimeout(relay.ctx, 3*time.Second)
+		_, subErr := pubsub.Receive(readyCtx)
+		stop()
+
+		h.mu.Lock()
+		if subErr != nil {
+			relay.initErr = subErr
+			if h.relays[room] == relay {
+				delete(h.relays, room)
+			}
+			relay.cancel()
+			close(relay.ready)
+			h.mu.Unlock()
+			_ = pubsub.Close()
+			h.releaseRoomRelay(relay)
+			return nil, subErr
+		}
+		if h.closed || relay.refs <= 0 || relay.ctx.Err() != nil {
+			initErr := relay.ctx.Err()
+			if initErr == nil {
+				initErr = errors.New("实时通知服务已关闭")
+			}
+			relay.initErr = initErr
+			if h.relays[room] == relay {
+				delete(h.relays, room)
+			}
+			relay.cancel()
+			close(relay.ready)
+			h.mu.Unlock()
+			_ = pubsub.Close()
+			h.releaseRoomRelay(relay)
+			return nil, initErr
+		}
+		relay.pubsub = pubsub
+		close(relay.ready)
+		h.mu.Unlock()
+
+		go relay.receive(pubsub)
+		if err := ctx.Err(); err != nil {
+			h.releaseRoomRelay(relay)
+			return nil, err
+		}
+		return relay, nil
+	}
+
+	select {
+	case <-relay.ready:
+		if relay.initErr != nil {
+			h.releaseRoomRelay(relay)
+			return nil, relay.initErr
+		}
+		return relay, nil
+	case <-ctx.Done():
+		h.releaseRoomRelay(relay)
+		return nil, ctx.Err()
+	}
+}
+
+func (h *RealtimeHub) releaseRoomRelay(relay *roomRelay) {
+	if relay == nil {
+		return
+	}
+	var closePubSub *redis.PubSub
+	h.mu.Lock()
+	relay.refs--
+	if relay.refs <= 0 {
+		if h.relays[relay.room] == relay {
+			delete(h.relays, relay.room)
+		}
+		relay.cancel()
+		closePubSub = relay.pubsub
+		relay.pubsub = nil
+	}
+	h.mu.Unlock()
+
+	if closePubSub != nil {
+		_ = closePubSub.Close()
+	}
+}
+
 func (h *RealtimeHub) Open(ctx context.Context, userID, canvasID string) (*RealtimeSession, []CanvasPresence, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &RealtimeSession{hub: h, room: realtimeRoom(userID, canvasID), peer: CanvasPresence{ID: kernel.NewID(), UpdatedAt: time.Now().UnixMilli()}, Events: make(chan RealtimeEvent, 128), ctx: ctx, cancel: cancel}
 	if h.redis != nil {
-		s.pubsub = h.redis.Subscribe(ctx, s.room)
-		ready, stop := context.WithTimeout(ctx, 3*time.Second)
-		_, err := s.pubsub.Receive(ready)
-		stop()
+		relay, err := h.acquireRoomRelay(ctx, s.room)
 		if err != nil {
 			cancel()
-			_ = s.pubsub.Close()
 			return nil, nil, err
 		}
+		s.relay = relay
 		if err := s.claimDeviceNumber(); err != nil {
 			cancel()
-			_ = s.pubsub.Close()
+			h.releaseRoomRelay(relay)
 			return nil, nil, err
 		}
 	}
 	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		cancel()
+		if s.relay != nil {
+			h.releaseRoomRelay(s.relay)
+			s.releaseDeviceNumber()
+		}
+		return nil, nil, errors.New("实时通知服务已关闭")
+	}
+	if s.relay != nil && (s.relay.ctx.Err() != nil || h.relays[s.room] != s.relay) {
+		h.mu.Unlock()
+		cancel()
+		h.releaseRoomRelay(s.relay)
+		s.releaseDeviceNumber()
+		return nil, nil, errors.New("实时通知连接已断开，请重试")
+	}
 	if len(h.rooms[s.room]) >= 64 {
 		h.mu.Unlock()
 		cancel()
-		if s.pubsub != nil {
-			_ = s.pubsub.Close()
+		if s.relay != nil {
+			h.releaseRoomRelay(s.relay)
 			s.releaseDeviceNumber()
 		}
 		return nil, nil, errors.New("此画布打开的窗口过多")
@@ -121,9 +259,6 @@ func (h *RealtimeHub) Open(ctx context.Context, userID, canvasID string) (*Realt
 	h.rooms[s.room][s.peer.ID] = s
 	peers = append(peers, s.Snapshot())
 	h.mu.Unlock()
-	if s.pubsub != nil {
-		go s.receive()
-	}
 	peer := s.Snapshot()
 	h.publish(s.room, RealtimeEvent{Type: "peer", Peer: &peer})
 	// Other instances answer with their participants, including idle cursors.
@@ -135,12 +270,33 @@ func (h *RealtimeHub) Changed(userID, canvasID string) {
 	h.publish(realtimeRoom(userID, canvasID), RealtimeEvent{Type: "invalidate"})
 }
 
-func (h *RealtimeHub) deliver(room string, event RealtimeEvent) {
+func (h *RealtimeHub) roomSnapshots(room string) []CanvasPresence {
+	h.mu.Lock()
+	sessions := make([]*RealtimeSession, 0, len(h.rooms[room]))
+	for _, session := range h.rooms[room] {
+		sessions = append(sessions, session)
+	}
+	h.mu.Unlock()
+
+	peers := make([]CanvasPresence, 0, len(sessions))
+	for _, session := range sessions {
+		peers = append(peers, session.Snapshot())
+	}
+	return peers
+}
+
+func (h *RealtimeHub) deliver(room string, event RealtimeEvent) bool {
 	if event.Type == "hello" {
-		return
+		h.mu.Lock()
+		closed := h.closed
+		h.mu.Unlock()
+		return !closed
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closed {
+		return false
+	}
 	for _, session := range h.rooms[room] {
 		select {
 		case session.Events <- event:
@@ -148,10 +304,13 @@ func (h *RealtimeHub) deliver(room string, event RealtimeEvent) {
 			session.cancel() // Slow consumers reconnect and read a fresh snapshot.
 		}
 	}
+	return true
 }
 
 func (h *RealtimeHub) publish(room string, event RealtimeEvent) {
-	h.deliver(room, event)
+	if !h.deliver(room, event) {
+		return
+	}
 	if h.redis == nil {
 		return
 	}
@@ -166,30 +325,88 @@ func (h *RealtimeHub) publish(room string, event RealtimeEvent) {
 	}
 }
 
-func (s *RealtimeSession) receive() {
+func (h *RealtimeHub) handleRelayDisconnect(relay *roomRelay, pubsub *redis.PubSub) {
+	var closePubSub *redis.PubSub
+	var sessions []*RealtimeSession
+	h.mu.Lock()
+	if h.relays[relay.room] == relay {
+		delete(h.relays, relay.room)
+	}
+	relay.cancel()
+	if relay.pubsub != nil {
+		closePubSub = relay.pubsub
+		relay.pubsub = nil
+	} else {
+		closePubSub = pubsub
+	}
+	for _, session := range h.rooms[relay.room] {
+		if session.relay == relay {
+			sessions = append(sessions, session)
+		}
+	}
+	h.mu.Unlock()
+
+	if closePubSub != nil {
+		_ = closePubSub.Close()
+	}
+	for _, session := range sessions {
+		session.cancel()
+	}
+}
+
+func (r *roomRelay) receive(pubsub *redis.PubSub) {
 	for {
-		message, err := s.pubsub.ReceiveMessage(s.ctx)
+		message, err := pubsub.ReceiveMessage(r.ctx)
 		if err != nil {
-			s.cancel()
+			if r.ctx.Err() == nil {
+				r.hub.handleRelayDisconnect(r, pubsub)
+			}
 			return
 		}
 		var event realtimeEnvelope
-		if json.Unmarshal([]byte(message.Payload), &event) != nil || event.Source == s.hub.id {
+		if json.Unmarshal([]byte(message.Payload), &event) != nil || event.Source == r.hub.id {
 			continue
 		}
 		if event.Type == "hello" {
-			peer := s.Snapshot()
-			s.hub.publish(s.room, RealtimeEvent{Type: "peer", Peer: &peer})
+			peers := r.hub.roomSnapshots(r.room)
+			for i := range peers {
+				peer := peers[i]
+				r.hub.publish(r.room, RealtimeEvent{Type: "peer", Peer: &peer})
+			}
 			continue
 		}
-		select {
-		case s.Events <- event.RealtimeEvent:
-		case <-s.ctx.Done():
-			return
-		default:
-			s.cancel()
-			return
+		r.hub.deliver(r.room, event.RealtimeEvent)
+	}
+}
+
+func (h *RealtimeHub) Close() {
+	if h == nil {
+		return
+	}
+	var pubsubs []*redis.PubSub
+	var sessions []*RealtimeSession
+	h.mu.Lock()
+	h.closed = true
+	for room, relay := range h.relays {
+		delete(h.relays, room)
+		relay.cancel()
+		if relay.pubsub != nil {
+			pubsubs = append(pubsubs, relay.pubsub)
+			relay.pubsub = nil
 		}
+	}
+	for _, roomSessions := range h.rooms {
+		for _, session := range roomSessions {
+			sessions = append(sessions, session)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, pubsub := range pubsubs {
+		_ = pubsub.Close()
+	}
+	for _, session := range sessions {
+		session.cancel()
 	}
 }
 
@@ -238,16 +455,16 @@ func (s *RealtimeSession) Heartbeat() {
 func (s *RealtimeSession) Close() {
 	s.once.Do(func() {
 		s.cancel()
-		if s.pubsub != nil {
-			_ = s.pubsub.Close()
-			s.releaseDeviceNumber()
-		}
 		s.hub.mu.Lock()
 		delete(s.hub.rooms[s.room], s.peer.ID)
 		if len(s.hub.rooms[s.room]) == 0 {
 			delete(s.hub.rooms, s.room)
 		}
 		s.hub.mu.Unlock()
+		if s.relay != nil {
+			s.hub.releaseRoomRelay(s.relay)
+			s.releaseDeviceNumber()
+		}
 		s.hub.publish(s.room, RealtimeEvent{Type: "leave", PeerID: s.peer.ID})
 	})
 }

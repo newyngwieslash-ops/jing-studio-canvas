@@ -138,6 +138,14 @@ func (c *BoundedReadCache[K, V]) remove(e *readCacheEntry[K, V]) {
 	}
 }
 
+func (c *BoundedReadCache[K, V]) Delete(key K) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.entries[key]; e != nil {
+		c.remove(e)
+	}
+}
+
 func (c *BoundedReadCache[K, V]) Clear() {
 	c.ClearAndCount()
 }

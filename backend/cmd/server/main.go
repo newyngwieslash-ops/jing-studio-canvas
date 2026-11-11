@@ -83,6 +83,13 @@ func run(ctx context.Context) error {
 	if err := svc.ValidateRuntime(); err != nil {
 		return err
 	}
+	requireObjectStorage, err := envBool("CANVAS_REQUIRE_OBJECT_STORAGE", false)
+	if err != nil {
+		return err
+	}
+	if err := svc.ValidateSaaSStorageReadiness(requireObjectStorage); err != nil {
+		return err
+	}
 	if err := svc.EnsureSystemChannelModels(); err != nil {
 		return err
 	}

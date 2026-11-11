@@ -104,18 +104,21 @@ type DramaCast struct {
 	// ParentID 非空表示这一行是 ParentID 角色的一套造型（妆造）：LookName 是造型名，Appearance 与参考图是这套造型的外观，
 	// 名称、别名与声音沿用所属角色。LookFromChapter / LookToChapter 是默认适用的原著章节号（从 1 起，0 表示不限），
 	// 写剧本时按本集章节选默认造型，镜头可按剧情另选。
-	ParentID        string    `json:"parentId,omitempty" gorm:"index;size:36"`
-	LookName        string    `json:"lookName,omitempty" gorm:"size:60"`
-	LookFromChapter int       `json:"lookFromChapter,omitempty"`
-	LookToChapter   int       `json:"lookToChapter,omitempty"`
-	Importance      int       `json:"importance"`
-	ImageResourceID string    `json:"imageResourceId,omitempty" gorm:"size:36"`
-	ImageStatus     string    `json:"imageStatus" gorm:"size:16"`
-	ImageVersion    int       `json:"imageVersion"`
-	Locked          bool      `json:"locked"`
-	Position        int       `json:"position"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ParentID        string `json:"parentId,omitempty" gorm:"index;size:36"`
+	LookName        string `json:"lookName,omitempty" gorm:"size:60"`
+	LookFromChapter int    `json:"lookFromChapter,omitempty"`
+	LookToChapter   int    `json:"lookToChapter,omitempty"`
+	Importance      int    `json:"importance"`
+	ImageResourceID string `json:"imageResourceId,omitempty" gorm:"size:36"`
+	// FaceResourceID 是用户为角色本体指定的人脸参考图：生成参考图时以它为参考图1做图生图，保持五官一致，
+	// 服装、发型与妆容仍按外貌描述和参考图方案。空串表示只按文字生成。造型行不使用（造型以角色本体参考图为底图）。
+	FaceResourceID string    `json:"faceResourceId,omitempty" gorm:"size:36"`
+	ImageStatus    string    `json:"imageStatus" gorm:"size:16"`
+	ImageVersion   int       `json:"imageVersion"`
+	Locked         bool      `json:"locked"`
+	Position       int       `json:"position"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 type DramaEpisode struct {

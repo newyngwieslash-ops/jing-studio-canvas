@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc64"
 	"io"
 	"net/http"
@@ -19,13 +20,11 @@ import (
 	"time"
 
 	"yingce/backend/internal/assets"
+	"yingce/backend/internal/database"
 	"yingce/backend/internal/model"
 	"yingce/backend/internal/outbound/outboundtest"
 	"yingce/backend/internal/repository"
 	"yingce/backend/internal/storage"
-
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
 func TestSignedOSSObjectURLUsesExpiringQuerySignature(t *testing.T) {
@@ -964,14 +963,26 @@ func TestUserOSSSettingVersionsKeepHistoricalSecrets(t *testing.T) {
 
 func newResourceTestService(t *testing.T) *Service {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	db, err := database.Open(database.Config{
+		Driver: "sqlite",
+		DSN:    fmt.Sprintf("file:%s_%d?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"), time.Now().UnixNano()),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	if err := db.AutoMigrate(&model.SystemSetting{}, &model.UserOSSSetting{}, &model.StorageLocation{}, &model.UserDailyUploadUsage{}, &model.Resource{}, &model.ResourceOffloadJob{}, &model.UploadReservation{}, &model.UserStorageGrant{}, &model.UserStorageState{}); err != nil {
 		t.Fatal(err)
 	}
-	return &Service{repo: repository.New(db), dataDir: t.TempDir()}
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, ".settings-key"), bytes.Repeat([]byte{7}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return &Service{repo: repository.New(db), dataDir: dataDir}
 }
 
 func TestStoreResourceReusesReadyUploadIdentity(t *testing.T) {

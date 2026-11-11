@@ -76,6 +76,15 @@ func (r *Repository) AssetVersion(id string) (*model.AssetVersion, error) {
 	return &version, nil
 }
 
+func (r *Repository) AssetVersionsByIDs(ids []string) ([]model.AssetVersion, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var versions []model.AssetVersion
+	err := r.db.Where("id IN ?", ids).Find(&versions).Error
+	return versions, err
+}
+
 func (r *Repository) AssetRepresentations(assetVersionID string) ([]model.AssetRepresentation, error) {
 	var representations []model.AssetRepresentation
 	err := r.db.Where("asset_version_id = ?", assetVersionID).Order("role asc, created_at asc").Find(&representations).Error
@@ -105,12 +114,30 @@ func (r *Repository) CharacterVoiceBinding(assetVersionID string) (*model.Charac
 	return &binding, nil
 }
 
+func (r *Repository) CharacterVoiceBindingsByVersionIDs(versionIDs []string) ([]model.CharacterVoiceBinding, error) {
+	if len(versionIDs) == 0 {
+		return nil, nil
+	}
+	var bindings []model.CharacterVoiceBinding
+	err := r.db.Where("asset_version_id IN ?", versionIDs).Find(&bindings).Error
+	return bindings, err
+}
+
 func (r *Repository) VoiceProfileForUser(userID string, id string) (*model.VoiceProfile, error) {
 	var profile model.VoiceProfile
 	if err := r.db.First(&profile, "id = ? AND user_id = ?", id, userID).Error; err != nil {
 		return nil, err
 	}
 	return &profile, nil
+}
+
+func (r *Repository) VoiceProfilesForUserByIDs(userID string, ids []string) ([]model.VoiceProfile, error) {
+	if userID == "" || len(ids) == 0 {
+		return nil, nil
+	}
+	var profiles []model.VoiceProfile
+	err := r.db.Where("user_id = ? AND id IN ?", userID, ids).Find(&profiles).Error
+	return profiles, err
 }
 
 func (r *Repository) VoiceProfiles(userID string) ([]model.VoiceProfile, error) {

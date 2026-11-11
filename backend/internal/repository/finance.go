@@ -243,6 +243,9 @@ func (r *Repository) RetryTaskWithBilling(userID string, prepared *model.Task, o
 		}
 		return tx.First(&task, "id = ? AND user_id = ?", taskID, userID).Error
 	})
+	if err == nil {
+		r.wakeChanged("task-text:" + taskID)
+	}
 	return &task, err
 }
 

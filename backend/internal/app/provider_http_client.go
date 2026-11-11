@@ -299,10 +299,12 @@ func doBinaryWithConsumer(req *http.Request, onChunk func(string, []byte)) ([]by
 			defer release()
 		}
 	}
-	if _, err := ValidateOutboundURL(req.URL.String()); err != nil {
+	validatedReq, err := ValidateOutboundRequest(req)
+	if err != nil {
 		recordProviderRequest(req, startedAt, 0, nil, err)
 		return nil, "", err
 	}
+	req = validatedReq
 	ApplyDefaultOutboundHeaders(req)
 	client := OutboundHTTPClientWithProxy(requestTimeout, channelProxyURL)
 	resp, err := client.Do(req)

@@ -62,7 +62,13 @@ func (r *Repository) ClaimNextTask(owner string, leaseDuration time.Duration) (*
 	now := time.Now()
 	leaseExpiresAt := now.Add(leaseDuration)
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		query := tx.Where("(status = ? OR (status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?))) AND (next_poll_at IS NULL OR next_poll_at <= ?)", model.TaskStatusQueued, model.TaskStatusRunning, now, now).
+		query := tx.Where(
+			"status IN ('queued', 'running') AND (status = ? OR (status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?))) AND (next_poll_at IS NULL OR next_poll_at <= ?)",
+			model.TaskStatusQueued,
+			model.TaskStatusRunning,
+			now,
+			now,
+		).
 			Order("created_at asc").Limit(1)
 		if r.Dialect() == "postgres" {
 			query = query.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
@@ -104,6 +110,7 @@ func (r *Repository) ClaimNextTask(owner string, leaseDuration time.Duration) (*
 	if err != nil || task.ID == "" {
 		return nil, err
 	}
+	r.wakeChanged("task-text:" + task.ID)
 	return &task, nil
 }
 
@@ -142,6 +149,7 @@ func (r *Repository) DeferRunningTaskForProviderPoll(id string, owner string, st
 	if result.RowsAffected != 1 {
 		return ErrTaskStateConflict
 	}
+	r.wakeChanged("task-text:" + id)
 	return nil
 }
 
@@ -176,9 +184,13 @@ func (r *Repository) ReleaseTaskProviderRecovery(id string, owner string) error 
 }
 
 func (r *Repository) UpdateTaskProgress(id string, stage string, progress int) error {
-	return r.db.Model(&model.Task{}).Where("id = ? AND status = ?", id, model.TaskStatusRunning).Updates(map[string]any{
+	result := r.db.Model(&model.Task{}).Where("id = ? AND status = ?", id, model.TaskStatusRunning).Updates(map[string]any{
 		"stage": stage, "progress": progress, "updated_at": time.Now(),
-	}).Error
+	})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.wakeChanged("task-text:" + id)
+	}
+	return result.Error
 }
 
 func (r *Repository) UpdateTaskProgressForLease(id string, owner string, stage string, progress int) error {
@@ -191,6 +203,7 @@ func (r *Repository) UpdateTaskProgressForLease(id string, owner string, stage s
 	if result.RowsAffected != 1 {
 		return ErrTaskStateConflict
 	}
+	r.wakeChanged("task-text:" + id)
 	return nil
 }
 
@@ -206,11 +219,15 @@ func taskLeaseWriter(db *gorm.DB, owner string) *gorm.DB {
 // a delayed or out-of-order poll response to move the public percentage backwards.
 func (r *Repository) UpdateTaskProviderProgress(id string, progress int) error {
 	progress = max(0, min(100, progress))
-	return r.db.Model(&model.Task{}).Where("id = ? AND status = ?", id, model.TaskStatusRunning).Updates(map[string]any{
+	result := r.db.Model(&model.Task{}).Where("id = ? AND status = ?", id, model.TaskStatusRunning).Updates(map[string]any{
 		"stage":      "上游生成中",
 		"progress":   gorm.Expr("CASE WHEN progress < ? THEN ? ELSE progress END", progress, progress),
 		"updated_at": time.Now(),
-	}).Error
+	})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.wakeChanged("task-text:" + id)
+	}
+	return result.Error
 }
 
 func (r *Repository) SaveTaskCompletion(task *model.Task, expected model.TaskStatus, results []model.Result) error {
@@ -243,9 +260,12 @@ func (r *Repository) SaveTaskCompletionWithRegistration(task *model.Task, expect
 			}
 			// 版本化资产绑定可能补充结果状态；与任务终态在同一事务保存。
 			if task.ResultJSON != storedResultJSON {
-				return tx.Model(&model.Task{}).Where("id = ?", task.ID).Update("result_json", task.ResultJSON).Error
+				if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).Update("result_json", task.ResultJSON).Error; err != nil {
+					return err
+				}
 			}
 		}
+		repo.wakeChanged("task-text:" + task.ID)
 		return nil
 	})
 }
@@ -257,6 +277,9 @@ func (r *Repository) UpdateTaskTerminalState(id string, owner string, expected m
 			"status": status, "stage": stage, "error": errorText, "completed_at": &completedAt,
 			"lease_owner": "", "lease_expires_at": nil, "updated_at": completedAt,
 		})
+	if result.Error == nil && result.RowsAffected == 1 {
+		r.wakeChanged("task-text:" + id)
+	}
 	return result.RowsAffected == 1, result.Error
 }
 
@@ -270,6 +293,9 @@ func (r *Repository) UpdateTaskTerminalDiagnostic(task *model.Task, completedAt 
 			"cancellation_requested_at": task.CancellationRequestedAt,
 			"lease_owner":               "", "lease_expires_at": nil, "updated_at": completedAt,
 		})
+	if result.Error == nil && result.RowsAffected == 1 {
+		r.wakeChanged("task-text:" + task.ID)
+	}
 	return result.RowsAffected == 1, result.Error
 }
 
@@ -303,6 +329,9 @@ func (r *Repository) CancelTaskIfStatus(userID string, id string, expected model
 	result := r.db.Model(&model.Task{}).
 		Where("id = ? AND user_id = ? AND status = ?", id, userID, expected).
 		Updates(updates)
+	if result.Error == nil && result.RowsAffected == 1 {
+		r.wakeChanged("task-text:" + id)
+	}
 	return result.RowsAffected == 1, result.Error
 }
 
@@ -383,6 +412,7 @@ func (r *Repository) ClaimNextTaskProviderCancellation(owner string, leaseDurati
 	if err != nil || task.ID == "" {
 		return nil, err
 	}
+	r.wakeChanged("task-text:" + task.ID)
 	return &task, nil
 }
 

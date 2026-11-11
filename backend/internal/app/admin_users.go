@@ -247,11 +247,13 @@ func (s *Service) UpdateUser(actor *model.User, userID string, req UpdateUserReq
 		if err := s.repo.DeleteUserAuthSessions(user.ID); err != nil {
 			return nil, fmt.Errorf("清理旧登录会话失败，密码未更新：%w", err)
 		}
+		s.invalidateUserAuthCache(user.ID)
 	}
 	if nextStatus == model.UserStatusDisabled {
 		if err := s.repo.DeleteUserAuthSessions(user.ID); err != nil {
 			return nil, err
 		}
+		s.invalidateUserAuthCache(user.ID)
 	}
 	user.Role = nextRole
 	user.Status = nextStatus
@@ -269,6 +271,7 @@ func (s *Service) UpdateUser(actor *model.User, userID string, req UpdateUserReq
 	if err := s.repo.Save(user); err != nil {
 		return nil, err
 	}
+	s.invalidateUserAuthCache(user.ID)
 	if err := s.appendAdminAudit(actor, "user.update", "user", user.ID, "更新用户账号状态或资料", map[string]any{"role": user.Role, "status": user.Status, "isPromoter": user.IsPromoter, "userGroup": normalizeUserGroupCode(user.UserGroup)}); err != nil {
 		return nil, err
 	}
@@ -298,6 +301,7 @@ func (s *Service) DeleteUser(actor *model.User, userID string) error {
 	if err := s.repo.DeleteUserAuthSessions(user.ID); err != nil {
 		return err
 	}
+	s.invalidateUserAuthCache(user.ID)
 	if err := s.repo.DeleteUserTaskTextDeltas(user.ID); err != nil {
 		return err
 	}
@@ -307,6 +311,7 @@ func (s *Service) DeleteUser(actor *model.User, userID string) error {
 	if err := s.repo.Save(user); err != nil {
 		return err
 	}
+	s.invalidateUserAuthCache(user.ID)
 	return s.appendAdminAudit(actor, "user.disable", "user", user.ID, "停用用户并清除登录态", nil)
 }
 
@@ -355,5 +360,6 @@ func (s *Service) BulkDisableUsers(actor *model.User, req BulkDisableUsersReques
 	if err != nil {
 		return nil, err
 	}
+	s.invalidateUserAuthCache(userIDs...)
 	return &BulkDisableUsersResult{Users: users, DisabledCount: len(users)}, nil
 }

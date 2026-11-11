@@ -59,16 +59,22 @@ func (r *Repository) EnsureCloudAgent(run *model.CloudAgentExecution) error {
 			run.Title = parent.Title
 		}
 	}
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.Transaction(func(repo *Repository) error {
+		tx := repo.db
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(run).Error; err != nil {
 			return err
 		}
 		// The marker excludes completed Pi carriers (still text_replay) from
 		// reservation scans. It is not a cached busy/idle or permission flag.
-		return tx.Exec(`UPDATE tasks SET agent_execution_ready = true
+		if err := tx.Exec(`UPDATE tasks SET agent_execution_ready = true
 			WHERE id = ? AND user_id = ? AND operation = 'cloud_agent' AND agent_execution_ready = false
-			AND EXISTS (SELECT 1 FROM cloud_agent_executions e WHERE e.id = tasks.id AND e.user_id = tasks.user_id)`, run.ID, run.UserID).Error
+			AND EXISTS (SELECT 1 FROM cloud_agent_executions e WHERE e.id = tasks.id AND e.user_id = tasks.user_id)`, run.ID, run.UserID).Error; err != nil {
+			return err
+		}
+		repo.wakeChanged("agent-run:" + run.ID)
+		return nil
 	})
+	return err
 }
 
 // CloudAgent 在同一个只读事务里读取执行行和它的事件/消息行。分开读的话，并发写入
@@ -237,7 +243,8 @@ func (r *Repository) RecentCloudAgentEventsForUser(userID string, runLimit int) 
 
 // Lock before reading: checkpoints, canvas writes and task reservations commit together.
 func (r *Repository) MutateCloudAgent(userID, id string, revision int64, fn func(*model.CloudAgentExecution, *Repository) error) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	return r.Transaction(func(repo *Repository) error {
+		tx := repo.db
 		q := tx.Model(&model.CloudAgentExecution{}).Where("id = ? AND user_id = ? AND revision = ?", id, userID, revision).UpdateColumn("revision", gorm.Expr("revision + 1"))
 		if q.Error != nil {
 			return q.Error
@@ -258,7 +265,7 @@ func (r *Repository) MutateCloudAgent(userID, id string, revision int64, fn func
 		for _, message := range run.Transcript {
 			previousMessages[fmt.Sprintf("%s:%d", message.Kind, message.Sequence)] = message.MessageJSON
 		}
-		if err = fn(run, New(tx)); err != nil {
+		if err = fn(run, repo); err != nil {
 			return err
 		}
 		if run.EventCount < previousEvents {
@@ -320,6 +327,7 @@ func (r *Repository) MutateCloudAgent(userID, id string, revision int64, fn func
 				return err
 			}
 		}
+		repo.wakeChanged("agent-run:" + id)
 		return nil
 	})
 }
@@ -424,6 +432,7 @@ func (r *Repository) MarkCloudAgentFailed(userID, id string, revision int64, mes
 	if result.RowsAffected != 1 {
 		return ErrCreationConflict
 	}
+	r.wakeChanged("agent-run:" + id)
 	return nil
 }
 
@@ -440,6 +449,7 @@ func (r *Repository) MarkCloudAgentCancelled(userID, id string, revision int64) 
 	if result.RowsAffected != 1 {
 		return ErrCreationConflict
 	}
+	r.wakeChanged("agent-run:" + id)
 	return nil
 }
 

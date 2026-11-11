@@ -55,6 +55,8 @@ type ResourceAccess struct {
 	RefreshAt        time.Time       `json:"refreshAt"`
 	Revision         string          `json:"revision"`
 	FallbackReason   string          `json:"fallbackReason,omitempty"`
+	OriginalWidth    int             `json:"originalWidth,omitempty"`
+	OriginalHeight   int             `json:"originalHeight,omitempty"`
 }
 
 func AccessError(status int, reason, message string) *kernel.AppError {
@@ -83,6 +85,9 @@ func NormalizeAccessOptions(options AccessOptions, allowProvider bool) (AccessOp
 		return options, kernel.BadAuthRequest("资源变体无效")
 	}
 	if options.Purpose == PurposeCopy || options.Purpose == PurposeDownload || options.Purpose == PurposeProvider || options.Purpose == PurposeEcommerceExport {
+		options.Variant = VariantOriginal
+	}
+	if options.Purpose != PurposeDisplay && options.Variant == VariantThumbnail {
 		options.Variant = VariantOriginal
 	}
 	if options.Purpose != PurposeDownload {
@@ -132,6 +137,10 @@ func ResolveAccess(resource *model.Resource, setting storage.Settings, options A
 	}
 	access := &ResourceAccess{ResourceID: resource.ID, RequestedVariant: options.Variant, ActualVariant: VariantOriginal,
 		IssuedAt: now, ExpiresAt: &expires, RefreshAt: now.Add(expires.Sub(now) * 4 / 5), Revision: resource.ETag + ":" + resource.PlaybackStatus + ":" + storage.DeliveryRevision(setting)}
+	if resource.Width > 0 && resource.Height > 0 {
+		access.OriginalWidth = resource.Width
+		access.OriginalHeight = resource.Height
+	}
 	if options.Variant == VariantPlayback {
 		if resource.Provider == "local" && resource.PlaybackStatus == model.PlaybackStatusReady && resource.PlaybackObjectKey != "" {
 			access.ActualVariant = VariantPlayback
@@ -140,7 +149,11 @@ func ResolveAccess(resource *model.Resource, setting storage.Settings, options A
 		}
 	}
 	if options.Variant == VariantThumbnail {
-		access.FallbackReason = "thumbnail_not_ready"
+		if resource.Provider != "local" && (resource.Kind == "" || resource.Kind == "image") && resource.Width > 640 && resource.Height > 0 && storage.SupportsCloudThumbnail(setting, resource.MimeType) {
+			access.ActualVariant = VariantThumbnail
+		} else {
+			access.FallbackReason = "thumbnail_not_ready"
+		}
 	}
 	if options.Purpose == PurposeEcommerceExport {
 		access.Delivery = DeliveryProxy
@@ -170,7 +183,11 @@ func ResolveAccess(resource *model.Resource, setting storage.Settings, options A
 		access.URL, err = storage.SignedOriginObjectDownloadURL(setting, resource.ObjectKey, expires, options.DownloadName)
 		access.Delivery = DeliveryOrigin
 	} else if storage.CDNEnabled(setting) {
-		access.URL, err = storage.SignCDNURL(setting, resource.ObjectKey, expires)
+		if access.ActualVariant == VariantThumbnail {
+			access.URL, err = storage.SignCDNThumbnailURL(setting, resource.ObjectKey, expires)
+		} else {
+			access.URL, err = storage.SignCDNURL(setting, resource.ObjectKey, expires)
+		}
 		access.Delivery = DeliveryCDN
 		if setting.Delivery.CDNAuthMode == "public" {
 			access.ExpiresAt = nil
@@ -178,7 +195,13 @@ func ResolveAccess(resource *model.Resource, setting storage.Settings, options A
 	} else if setting.Delivery.RequireCDN {
 		return nil, AccessError(503, "resource_cdn_unconfigured", "CDN 访问鉴权未配置，请检查存储分发设置")
 	} else if storage.PublicOrigin(setting) {
-		if signedAt.IsZero() {
+		if access.ActualVariant == VariantThumbnail {
+			if signedAt.IsZero() {
+				access.URL, err = storage.SignedOriginObjectThumbnailURL(setting, resource.ObjectKey, expires)
+			} else {
+				access.URL, err = storage.SignedOriginObjectThumbnailDisplayURL(setting, resource.ObjectKey, signedAt, expires)
+			}
+		} else if signedAt.IsZero() {
 			access.URL, err = storage.SignedOriginObjectURL(setting, resource.ObjectKey, expires)
 		} else {
 			access.URL, err = storage.SignedOriginObjectDisplayURL(setting, resource.ObjectKey, signedAt, expires)

@@ -5,6 +5,32 @@ description: 影策后端核心持久化表与状态边界
 
 # 后端数据库
 
+## 活跃任务领取部分索引与连接池配置（Schema 94）
+
+版本 94 `tasks_active_claim_partial_index` 在 `tasks` 表上创建仅覆盖活跃状态的部分索引，不新增或改写任何列与历史任务记录：
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_tasks_active_claim
+ON tasks (created_at, next_poll_at)
+WHERE status IN ('queued', 'running');
+```
+
+- **调度查询边界**：`ClaimNextTask` 显式携带 `status IN ('queued', 'running')` 合取谓词并按 `created_at ASC` 领取到期任务。终态与存档行（`succeeded`、`failed`、`cancelled`、`text_replay`）不进入该索引，即使 `tasks` 累积百万级历史记录，Worker 领取扫描代价仍只与当前在途任务数成正比，无需临时排序。SQLite 与 PostgreSQL 均原生支持该部分索引。
+- **PostgreSQL 连接池参数**：后端启动连接 PostgreSQL 时支持通过环境变量按副本规模调整连接池（未配置或非法值回退默认）：
+
+| 环境变量 | 默认值 | 约束与说明 |
+| --- | --- | --- |
+| `CANVAS_DB_MAX_OPEN_CONNS` | `50` | 单进程最大打开连接数，夹取范围 `1`–`500` |
+| `CANVAS_DB_MAX_IDLE_CONNS` | `25` | 单进程最大空闲连接数，自动不超过 `CANVAS_DB_MAX_OPEN_CONNS` |
+| `CANVAS_DB_CONN_MAX_LIFETIME` | `30m` | 单条连接最长存活时间（Go duration 或正整数秒） |
+| `CANVAS_DB_CONN_MAX_IDLE_TIME` | `10m` | 空闲连接最长保留时间，自动不超过 `CANVAS_DB_CONN_MAX_LIFETIME` |
+
+横向扩容多个 `backend` 副本时，需确保「副本数 × `CANVAS_DB_MAX_OPEN_CONNS` + 迁移与运维预留连接」低于 PostgreSQL 实例的 `max_connections`；连接预算紧张或副本较多时应相应下调单副本 `CANVAS_DB_MAX_OPEN_CONNS` 或前置 PgBouncer 连接池。
+
+## 短剧角色人脸参考（Schema 93）
+
+版本 93 `drama_cast_face_reference` 为 `drama_casts` 增加 `face_resource_id`（最长 36 字，旧数据为空串）：角色本体（`kind=character` 且 `parent_id` 为空）的人脸参考图资源。非空时角色参考图以它为参考图1走 `image_to_image`，五官以它为准，服装、发型与妆容仍按 `appearance` 与参考图方案；造型行不使用此列，继续以角色本体当前参考图为底图。设置时校验资源属于当前用户且是已就绪图片。合并上游 Schema 92（`drama_reference_controls`）前若本地已将 `drama_cast_face_reference` 记录为版本 92（校验和 `sha256:drama-cast-face-reference-v92-20261108`）、不存在更高迁移记录且 `face_resource_id` 列已存在，迁移器会在同一事务内将该记录归一到版本 93 并补齐版本 92 的 `drama_reference_controls` 列。
+
 ## 邮件发送记录与消费日报订阅（Schema 91）
 
 版本 91 `email_logs_and_notifications` 新增两张表，只建表不改旧数据：

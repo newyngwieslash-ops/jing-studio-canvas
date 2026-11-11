@@ -490,7 +490,11 @@ func (s *Service) DramaSummary(userID string, projectID string) (DramaSummary, e
 			}
 		}
 		// Title 只放名称，前端按原因把同类失败折叠成一组，不再逐条重复“参考图生成失败”。
-		summary.Inbox = append(summary.Inbox, DramaInboxItem{ID: "cast:" + cast.ID, Kind: "cast_failed", Severity: "error", Title: cast.Name, Detail: firstNonEmpty(truncateRunes(castErrors[cast.ID], 240), "参考图生成失败"), CastID: cast.ID, CastKind: cast.Kind})
+		_, recoverable, err := s.dramaRecoverableCastJob(project.ID, cast.ID)
+		if err != nil {
+			return DramaSummary{}, err
+		}
+		summary.Inbox = append(summary.Inbox, DramaInboxItem{ID: "cast:" + cast.ID, Kind: "cast_failed", Severity: "error", Title: cast.Name, Detail: firstNonEmpty(truncateRunes(castErrors[cast.ID], 240), "参考图生成失败"), CastID: cast.ID, CastKind: cast.Kind, Recoverable: recoverable})
 	}
 	failedSegments, err := s.repo.FailedDramaSegments(project.ID, dramaInboxShotLimit)
 	if err != nil {

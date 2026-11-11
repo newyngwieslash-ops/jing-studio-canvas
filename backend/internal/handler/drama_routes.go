@@ -337,6 +337,16 @@ func registerDramaRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		return svc.SetDramaCastImage(userID, c.Param("id"), c.Param("castId"), req)
 	}))
+	r.PUT("/dramas/:id/cast/:castId/face", dramaRoute(svc, 4<<10, func(c *gin.Context, userID string) (any, error) {
+		var req service.SetDramaCastFaceRequest
+		if err := bindDramaJSON(c, &req); err != nil {
+			return nil, err
+		}
+		return svc.SetDramaCastFace(userID, c.Param("id"), c.Param("castId"), req)
+	}))
+	r.POST("/dramas/:id/cast/:castId/recover", dramaRoute(svc, 1<<10, func(c *gin.Context, userID string) (any, error) {
+		return svc.RecoverDramaCastImage(userID, c.Param("id"), c.Param("castId"))
+	}))
 	r.POST("/dramas/:id/cast/:castId/looks", dramaRoute(svc, 16<<10, func(c *gin.Context, userID string) (any, error) {
 		var req service.DramaCastLookRequest
 		if err := bindDramaJSON(c, &req); err != nil {

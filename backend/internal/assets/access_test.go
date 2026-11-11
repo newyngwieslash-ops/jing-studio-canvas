@@ -269,3 +269,332 @@ func mustQuery(t *testing.T, raw string) url.Values {
 	}
 	return parsed.Query()
 }
+
+func TestResolveAccessSignsCloudThumbnailAndMaintainsWindowStability(t *testing.T) {
+	outboundtest.PublicDNS(t, "oss-cn-hangzhou.aliyuncs.com", "cos.ap-guangzhou.myqcloud.com")
+	windowStart := time.Date(2030, time.September, 30, 18, 0, 1, 0, time.UTC)
+	windowEnd := time.Date(2030, time.September, 30, 23, 59, 0, 0, time.UTC)
+	nextWindow := time.Date(2030, time.October, 1, 0, 0, 1, 0, time.UTC)
+	ttlPolicy := storage.RuntimePolicy{AccessURLTTL: 24 * time.Hour}
+
+	cases := []struct {
+		name         string
+		provider     string
+		setting      storage.Settings
+		wantMode     DeliveryMode
+		wantReason   string
+		wantSubstr   string
+		wantNilExp   bool
+		expectRotate bool
+	}{
+		{
+			name:     "aliyun origin",
+			provider: "aliyun",
+			setting: storage.Settings{
+				Provider: "aliyun", Endpoint: "https://oss-cn-hangzhou.aliyuncs.com", Bucket: "canvas-prod",
+				AccessKeyID: "ak", AccessKeySecret: "sk", Runtime: ttlPolicy,
+			},
+			wantMode: DeliveryOrigin, wantSubstr: "x-oss-process=", expectRotate: true,
+		},
+		{
+			name:     "aliyun public CDN",
+			provider: "aliyun",
+			setting: storage.Settings{
+				Provider: "aliyun", CDNBaseURL: "https://cdn.example.com",
+				Delivery: storage.DeliverySettings{CDNAuthMode: "public"}, Runtime: ttlPolicy,
+			},
+			wantMode: DeliveryCDN, wantSubstr: "x-oss-process=", wantNilExp: true,
+		},
+		{
+			name:     "aliyun incomplete CDN falls back to origin thumbnail",
+			provider: "aliyun",
+			setting: storage.Settings{
+				Provider: "aliyun", Endpoint: "https://oss-cn-hangzhou.aliyuncs.com", Bucket: "canvas-prod",
+				CDNBaseURL: "https://cdn.example.com", AccessKeyID: "ak", AccessKeySecret: "sk", Runtime: ttlPolicy,
+			},
+			wantMode: DeliveryOrigin, wantReason: "cdn_auth_unconfigured", wantSubstr: "x-oss-process=", expectRotate: true,
+		},
+		{
+			name:     "tencent origin",
+			provider: "tencent",
+			setting: storage.Settings{
+				Provider: "tencent", Endpoint: "https://cos.ap-guangzhou.myqcloud.com", Bucket: "canvas-1250000000",
+				AccessKeyID: "ak", AccessKeySecret: "sk", Runtime: ttlPolicy,
+			},
+			wantMode: DeliveryOrigin, wantSubstr: "imageMogr2", expectRotate: true,
+		},
+		{
+			name:     "tencent public CDN",
+			provider: "tencent",
+			setting: storage.Settings{
+				Provider: "tencent", CDNBaseURL: "https://cdn.example.com",
+				Delivery: storage.DeliverySettings{CDNAuthMode: "public"}, Runtime: ttlPolicy,
+			},
+			wantMode: DeliveryCDN, wantSubstr: "?imageMogr2/thumbnail/640x/format/webp", wantNilExp: true,
+		},
+		{
+			name:     "qiniu private CDN",
+			provider: "qiniu",
+			setting: storage.Settings{
+				Provider: "qiniu", Endpoint: "https://up-z0.qiniup.com", CDNBaseURL: "https://cdn.example.com",
+				Delivery: storage.DeliverySettings{CDNAuthMode: "qiniu"}, Bucket: "canvas-prod",
+				AccessKeyID: "ak", AccessKeySecret: "sk", Runtime: ttlPolicy,
+			},
+			wantMode: DeliveryCDN, wantSubstr: "imageView2/2/w/640/format/webp", expectRotate: true,
+		},
+		{
+			name:     "qiniu public CDN",
+			provider: "qiniu",
+			setting: storage.Settings{
+				Provider: "qiniu", Endpoint: "https://up-z0.qiniup.com", CDNBaseURL: "https://cdn.example.com",
+				Delivery: storage.DeliverySettings{CDNAuthMode: "public"}, Bucket: "canvas-prod", Runtime: ttlPolicy,
+			},
+			wantMode: DeliveryCDN, wantSubstr: "?imageView2/2/w/640/format/webp", wantNilExp: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := testReadyResource(tc.provider)
+			res.Kind = "image"
+			res.Width = 1920
+			res.Height = 1080
+			res.ObjectKey = "users/user-1/image/a b.png"
+			opts := AccessOptions{Purpose: PurposeDisplay, Variant: VariantThumbnail}
+
+			first, err := ResolveAccess(res, tc.setting, opts, windowStart, testPlatformURL(&[]ResourceVariant{}))
+			if err != nil {
+				t.Fatalf("ResolveAccess() error = %v", err)
+			}
+			if first.RequestedVariant != VariantThumbnail || first.ActualVariant != VariantThumbnail || first.Delivery != tc.wantMode || first.FallbackReason != tc.wantReason {
+				t.Fatalf("got access = %#v, want variant=thumbnail delivery=%q reason=%q", first, tc.wantMode, tc.wantReason)
+			}
+			if first.OriginalWidth != 1920 || first.OriginalHeight != 1080 {
+				t.Fatalf("got dimensions %dx%d, want 1920x1080", first.OriginalWidth, first.OriginalHeight)
+			}
+			if !strings.Contains(first.URL, tc.wantSubstr) {
+				t.Fatalf("URL = %q, want substring %q", first.URL, tc.wantSubstr)
+			}
+			if tc.wantNilExp && first.ExpiresAt != nil {
+				t.Fatalf("ExpiresAt = %v, want nil", first.ExpiresAt)
+			}
+			if !tc.wantNilExp && first.ExpiresAt == nil {
+				t.Fatal("ExpiresAt = nil, want non-nil")
+			}
+
+			again, err := ResolveAccess(res, tc.setting, opts, windowEnd, testPlatformURL(&[]ResourceVariant{}))
+			if err != nil {
+				t.Fatalf("ResolveAccess(again) error = %v", err)
+			}
+			if again.URL != first.URL {
+				t.Fatalf("thumbnail URL changed within signing window:\n%s\n%s", first.URL, again.URL)
+			}
+
+			if tc.expectRotate {
+				rotated, err := ResolveAccess(res, tc.setting, opts, nextWindow, testPlatformURL(&[]ResourceVariant{}))
+				if err != nil {
+					t.Fatalf("ResolveAccess(nextWindow) error = %v", err)
+				}
+				if rotated.URL == first.URL {
+					t.Fatalf("expected URL to rotate in next window, still %s", rotated.URL)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveAccessThumbnailFallsBackToOriginalWhenUnsupported(t *testing.T) {
+	outboundtest.PublicDNS(t, "oss-cn-hangzhou.aliyuncs.com", "cos.ap-guangzhou.myqcloud.com", "s3.amazonaws.com", "tos-s3-cn-beijing.volces.com")
+	now := time.Date(2030, time.September, 30, 18, 0, 1, 0, time.UTC)
+
+	aliyunSetting := storage.Settings{
+		Provider: "aliyun", Endpoint: "https://oss-cn-hangzhou.aliyuncs.com", Bucket: "canvas-prod",
+		AccessKeyID: "ak", AccessKeySecret: "sk",
+	}
+	tencentSetting := storage.Settings{
+		Provider: "tencent", Endpoint: "https://cos.ap-guangzhou.myqcloud.com", Bucket: "canvas-1250000000",
+		AccessKeyID: "ak", AccessKeySecret: "sk",
+	}
+
+	t.Run("qiniu without CDN falls back to S3 original without imageView2", func(t *testing.T) {
+		res := testReadyResource("qiniu")
+		res.Kind = "image"
+		res.Width = 1920
+		res.Height = 1080
+		setting := storage.Settings{
+			Provider: "qiniu", Endpoint: "https://up-z0.qiniup.com", Bucket: "canvas-prod",
+			AccessKeyID: "ak", AccessKeySecret: "sk",
+		}
+		got, err := ResolveAccess(res, setting, AccessOptions{Purpose: PurposeDisplay, Variant: VariantThumbnail}, now, testPlatformURL(&[]ResourceVariant{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ActualVariant != VariantOriginal || got.FallbackReason != "thumbnail_not_ready" || got.Delivery != DeliveryOrigin {
+			t.Fatalf("qiniu S3 fallback = %#v", got)
+		}
+		if strings.Contains(got.URL, "imageView2") {
+			t.Fatalf("qiniu S3 origin URL must not contain imageView2: %s", got.URL)
+		}
+	})
+
+	for _, mimeType := range []string{"image/gif", "image/bmp", "image/tiff"} {
+		t.Run("excluded inline mime "+mimeType, func(t *testing.T) {
+			res := testReadyResource("aliyun")
+			res.Kind = "image"
+			res.Width = 1920
+			res.Height = 1080
+			res.MimeType = mimeType
+			got, err := ResolveAccess(res, aliyunSetting, AccessOptions{Purpose: PurposeDisplay, Variant: VariantThumbnail}, now, testPlatformURL(&[]ResourceVariant{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ActualVariant != VariantOriginal || got.FallbackReason != "thumbnail_not_ready" || strings.Contains(got.URL, "x-oss-process") {
+				t.Fatalf("%s access = %#v", mimeType, got)
+			}
+		})
+	}
+
+	t.Run("svg falls back to controlled platform proxy original", func(t *testing.T) {
+		res := testReadyResource("aliyun")
+		res.Kind = "image"
+		res.Width = 1920
+		res.Height = 1080
+		res.MimeType = "image/svg+xml"
+		var variants []ResourceVariant
+		got, err := ResolveAccess(res, aliyunSetting, AccessOptions{Purpose: PurposeDisplay, Variant: VariantThumbnail}, now, testPlatformURL(&variants))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ActualVariant != VariantOriginal || got.Delivery != DeliveryProxy || got.FallbackReason != "attachment_required" {
+			t.Fatalf("svg access = %#v", got)
+		}
+		if len(variants) != 1 || variants[0] != VariantOriginal {
+			t.Fatalf("svg platform variants = %#v, want original", variants)
+		}
+	})
+
+	t.Run("unknown dimensions 0x0 falls back to original so browser measures full size", func(t *testing.T) {
+		res := testReadyResource("aliyun")
+		res.Kind = "image"
+		res.Width = 0
+		res.Height = 0
+		got, err := ResolveAccess(res, aliyunSetting, AccessOptions{Purpose: PurposeDisplay, Variant: VariantThumbnail}, now, testPlatformURL(&[]ResourceVariant{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ActualVariant != VariantOriginal || got.FallbackReason != "thumbnail_not_ready" || got.OriginalWidth != 0 || got.OriginalHeight != 0 || strings.Contains(got.URL, "x-oss-process") {
+			t.Fatalf("0x0 access = %#v", got)
+		}
+	})
+
+	for _, dim := range [][2]int{{512, 512}, {640, 480}} {
+		t.Run("small dimensions do not upscale or recompress", func(t *testing.T) {
+			res := testReadyResource("tencent")
+			res.Kind = "image"
+			res.Width = dim[0]
+			res.Height = dim[1]
+			got, err := ResolveAccess(res, tencentSetting, AccessOptions{Purpose: PurposeDisplay, Variant: VariantThumbnail}, now, testPlatformURL(&[]ResourceVariant{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ActualVariant != VariantOriginal || got.FallbackReason != "thumbnail_not_ready" || got.OriginalWidth != dim[0] || got.OriginalHeight != dim[1] || strings.Contains(got.URL, "imageMogr2") {
+				t.Fatalf("%dx%d access = %#v", dim[0], dim[1], got)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		provider string
+		setting  storage.Settings
+	}{
+		{
+			name:     "s3",
+			provider: "s3",
+			setting:  storage.Settings{Provider: "s3", Region: "us-east-1", Endpoint: "https://s3.amazonaws.com", Bucket: "canvas-prod", AccessKeyID: "ak", AccessKeySecret: "sk"},
+		},
+		{
+			name:     "volcengine tos",
+			provider: "volcengine",
+			setting:  storage.Settings{Provider: "volcengine", Region: "cn-beijing", Endpoint: "https://tos-s3-cn-beijing.volces.com", Bucket: "canvas-prod", AccessKeyID: "ak", AccessKeySecret: "sk"},
+		},
+		{
+			name:     "local with cloud default setting",
+			provider: "local",
+			setting:  aliyunSetting,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := testReadyResource(tc.provider)
+			res.Kind = "image"
+			res.Width = 1920
+			res.Height = 1080
+			var variants []ResourceVariant
+			got, err := ResolveAccess(res, tc.setting, AccessOptions{Purpose: PurposeDisplay, Variant: VariantThumbnail}, now, testPlatformURL(&variants))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ActualVariant != VariantOriginal || got.FallbackReason != "thumbnail_not_ready" {
+				t.Fatalf("%s access = %#v", tc.name, got)
+			}
+			if strings.Contains(got.URL, "x-oss-process") || strings.Contains(got.URL, "imageMogr2") || strings.Contains(got.URL, "imageView2") {
+				t.Fatalf("%s URL unexpectedly contained cloud thumbnail param: %s", tc.name, got.URL)
+			}
+		})
+	}
+
+	t.Run("503 error paths preserved for thumbnail variant", func(t *testing.T) {
+		res := testReadyResource("aliyun")
+		res.Kind = "image"
+		res.Width = 1920
+		res.Height = 1080
+		opts := AccessOptions{Purpose: PurposeDisplay, Variant: VariantThumbnail}
+
+		requireCDNSetting := storage.Settings{
+			Provider: "aliyun", Endpoint: "https://oss-cn-hangzhou.aliyuncs.com", Bucket: "canvas-prod",
+			CDNBaseURL: "https://media.example.com", AccessKeyID: "ak", AccessKeySecret: "sk",
+			Delivery: storage.DeliverySettings{RequireCDN: true},
+		}
+		if _, err := ResolveAccess(res, requireCDNSetting, opts, now, testPlatformURL(&[]ResourceVariant{})); err == nil || errorReason(err) != "resource_cdn_unconfigured" {
+			t.Fatalf("RequireCDN error = %v, want resource_cdn_unconfigured", err)
+		}
+
+		privateOriginSetting := storage.Settings{
+			Provider: "aliyun", Endpoint: "http://storage.internal", Bucket: "canvas-prod",
+			AccessKeyID: "ak", AccessKeySecret: "sk",
+			Delivery: storage.DeliverySettings{AllowPrivateProxy: true},
+		}
+		if _, err := ResolveAccess(res, privateOriginSetting, opts, now, testPlatformURL(&[]ResourceVariant{})); err == nil || errorReason(err) != "resource_origin_private" {
+			t.Fatalf("private origin error = %v, want resource_origin_private", err)
+		}
+	})
+}
+
+func TestResolveAccessNormalizesNonDisplayThumbnailRequestsToOriginal(t *testing.T) {
+	outboundtest.PublicDNS(t, "oss-cn-hangzhou.aliyuncs.com")
+	now := time.Date(2030, time.September, 30, 18, 0, 1, 0, time.UTC)
+	setting := storage.Settings{
+		Provider: "aliyun", Endpoint: "https://oss-cn-hangzhou.aliyuncs.com", Bucket: "canvas-prod",
+		AccessKeyID: "ak", AccessKeySecret: "sk",
+	}
+	res := testReadyResource("aliyun")
+	res.Kind = "image"
+	res.Width = 1920
+	res.Height = 1080
+	res.Size = 1024
+
+	for _, purpose := range []AccessPurpose{PurposeDownload, PurposeCopy, PurposeProcess, PurposeProvider, PurposeEcommerceExport} {
+		t.Run(string(purpose), func(t *testing.T) {
+			got, err := ResolveAccess(res, setting, AccessOptions{Purpose: purpose, Variant: VariantThumbnail}, now, testPlatformURL(&[]ResourceVariant{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.RequestedVariant != VariantOriginal || got.ActualVariant != VariantOriginal {
+				t.Fatalf("%s access = %#v, want normalized original", purpose, got)
+			}
+			if strings.Contains(got.URL, "x-oss-process") {
+				t.Fatalf("%s URL must never carry thumbnail process param: %s", purpose, got.URL)
+			}
+		})
+	}
+}

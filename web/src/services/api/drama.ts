@@ -199,6 +199,8 @@ export type DramaInboxItem = {
     episodeNumber?: number;
     segmentIndex: number;
     media?: "prompt" | "video";
+    /** 参考图已生成但保存失败，可以重新保存（不重新生成、不重复扣费）。 */
+    recoverable?: boolean;
 };
 
 export type DramaSummary = {
@@ -411,6 +413,8 @@ export type DramaCast = {
     voiceInstructions: string;
     importance: number;
     imageResourceId?: string;
+    /** 角色本体的人脸参考图：生成参考图时五官以它为准，服装、发型与妆容按外貌描述。 */
+    faceResourceId?: string;
     imageStatus: DramaMediaStatus;
     imageVersion: number;
     locked: boolean;
@@ -685,6 +689,16 @@ export function setDramaCastImage(projectId: string, castId: string, resourceId:
         restyleSegments,
         ...(origin ? { source: origin.source, taskId: origin.taskId || "" } : {}),
     });
+}
+
+/** 为角色本体指定人脸参考并解锁、重新生成参考图；resourceId 为空串时只清除人脸参考。 */
+export function setDramaCastFace(projectId: string, castId: string, resourceId: string, restyleSegments: boolean) {
+    return http.put<{ affectedSegments: number }>(`${base(projectId)}/cast/${encodeURIComponent(castId)}/face`, { resourceId, restyleSegments });
+}
+
+/** 重新保存“已生成但保存失败”的参考图：沿用原任务，不重新生成、不重复扣费。 */
+export function recoverDramaCastImage(projectId: string, castId: string) {
+    return http.post<{ taskId: string }>(`${base(projectId)}/cast/${encodeURIComponent(castId)}/recover`);
 }
 
 /** 为角色指定声音：voiceProfileId 从声音库选，sampleResourceId 是刚上传或录制的样本（自动登记到声音库）。 */

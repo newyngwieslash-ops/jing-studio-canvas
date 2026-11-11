@@ -3330,18 +3330,23 @@ paths:
                           download,
                           browser-process,
                           provider-input,
+                          ecommerce-export,
                         ],
                       default: display,
                     }
                   variant:
                     {
                       type: string,
-                      enum: [original, playback],
+                      enum: [original, playback, thumbnail],
                       default: original,
                     }
       responses:
         "200":
-          $ref: "#/components/responses/Envelope"
+          description: 批量资源访问描述，位于信封 data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceAccessBatchEnvelope"
         "400":
           $ref: "#/components/responses/Error"
         "401":
@@ -3362,7 +3367,11 @@ paths:
         - in: query
           name: variant
           schema:
-            { type: string, enum: [original, playback], default: original }
+            {
+              type: string,
+              enum: [original, playback, thumbnail],
+              default: original,
+            }
         - in: query
           name: purpose
           schema:
@@ -3646,6 +3655,63 @@ components:
       in: cookie
       name: open_ai_canvas_session
   schemas:
+    ResourceAccess:
+      type: object
+      required:
+        [
+          resourceId,
+          requestedVariant,
+          actualVariant,
+          url,
+          delivery,
+          issuedAt,
+          refreshAt,
+          revision,
+        ]
+      properties:
+        resourceId: { type: string }
+        requestedVariant:
+          { type: string, enum: [original, playback, thumbnail] }
+        actualVariant: { type: string, enum: [original, playback, thumbnail] }
+        url: { type: string }
+        delivery:
+          {
+            type: string,
+            enum: [cdn, origin, platform-local, platform-proxy],
+          }
+        issuedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        refreshAt: { type: string, format: date-time }
+        revision: { type: string }
+        fallbackReason: { type: string }
+        originalWidth: { type: integer, minimum: 1 }
+        originalHeight: { type: integer, minimum: 1 }
+    ResourceAccessFailure:
+      type: object
+      required: [code, reason, msg]
+      properties:
+        code: { type: integer }
+        reason: { type: string }
+        msg: { type: string }
+    ResourceAccessResult:
+      type: object
+      required: [resourceId]
+      properties:
+        resourceId: { type: string }
+        access: { $ref: "#/components/schemas/ResourceAccess" }
+        error: { $ref: "#/components/schemas/ResourceAccessFailure" }
+    ResourceAccessBatchEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [data]
+          properties:
+            code:
+              type: integer
+              enum: [0]
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/ResourceAccessResult" }
     ThinkingRequest:
       type: string
       enum: ["", auto, deep, off, minimal, low, medium, high, max]

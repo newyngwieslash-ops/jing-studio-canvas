@@ -1,11 +1,21 @@
 {
   "schema_version": 1, "diagram_type": "sequence",
-  "meta": { "title": "影策 · Agent 推理与审批续跑", "locale": "zh-CN", "quality_profile": "showcase", "column_fit": "spread", "viewBox": [1080, 570] },
+  "meta": {
+    "title": "影策 · Agent 推理与审批续跑",
+    "output": "docs/architecture/diagrams/agent.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/newyngwieslash-ops/jing-studio-canvas.git",
+      "revision": "6ab49b692d6ebfd267826d7117f11100f8128af0",
+      "link_mode": "local-only"
+    }
+  },
   "participants": [
-    { "id": "agent-ui", "type": "frontend", "label": "Agent 界面", "sublabel": "会话与审批" },
-    { "id": "go-agent", "type": "backend", "label": "Go 编排与桥接", "sublabel": "策略与持久化" },
-    { "id": "node-pi", "type": "backend", "label": "Node pi", "sublabel": "Agent 推理循环" },
-    { "id": "llm", "type": "external", "label": "文本模型", "sublabel": "后端渠道" }
+    { "id": "agent-ui", "type": "frontend", "label": "Agent 界面", "sublabel": "会话与审批", "sources": [{ "path": "web/src/router.tsx", "line": 88, "end_line": 101 }] },
+    { "id": "go-agent", "type": "backend", "label": "Go 编排与桥接", "sublabel": "策略与持久化", "sources": [{ "path": "backend/internal/app/cloud_agent_pi_coordinator.go", "line": 27, "end_line": 94 }] },
+    { "id": "node-pi", "type": "backend", "label": "Node pi", "sublabel": "Agent 推理循环", "sources": [{ "path": "docker-compose.deploy.yml", "line": 41, "end_line": 55 }] },
+    { "id": "llm", "type": "external", "label": "文本模型", "sublabel": "后端渠道", "sources": [{ "path": "backend/internal/app/provider.go", "line": 41, "end_line": 58 }] }
   ],
   "messages": [
     { "id": "start", "from": "agent-ui", "to": "go-agent", "y": 160, "label": "提交会话消息", "variant": "emphasis" },

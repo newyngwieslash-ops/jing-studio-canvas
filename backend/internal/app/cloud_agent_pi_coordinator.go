@@ -15,19 +15,42 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
 	"yingce/backend/internal/model"
+	"yingce/backend/internal/platform"
 	"yingce/backend/internal/repository"
 )
+
+var (
+	cloudAgentRunLeaseTTL           = 45 * time.Second
+	cloudAgentRunLeaseRenewInterval = 15 * time.Second
+)
+
+const cloudAgentCancelChannel = "canvas:agent:cancel"
+
+func (s *Service) acquireCloudAgentRunLease(ctx context.Context, runID string) (*platform.SlotLease, bool, error) {
+	return s.acquireCloudAgentRunLeaseWithTTL(ctx, runID, cloudAgentRunLeaseTTL)
+}
+
+func (s *Service) acquireCloudAgentRunLeaseWithTTL(ctx context.Context, runID string, ttl time.Duration) (*platform.SlotLease, bool, error) {
+	if s == nil || s.coordinator == nil {
+		return nil, true, nil
+	}
+	return s.coordinator.AcquireLease(ctx, "agent-run:"+runID, 1, ttl)
+}
 
 // startCloudAgentPi 是唯一的生产入口
 func (s *Service) startCloudAgentPi(userID, runID string) {
 	if s == nil || s.disablePiRuntime || runID == "" {
 		return
 	}
+
+	leaseTTL := cloudAgentRunLeaseTTL
+	renewInterval := cloudAgentRunLeaseRenewInterval
 
 	s.piRunnerMu.Lock()
 	if s.piRunners == nil {
@@ -53,20 +76,79 @@ func (s *Service) startCloudAgentPi(userID, runID string) {
 	s.piRunnerMu.Unlock()
 
 	go func() {
+		var releaseLease func()
+		var leaseLost atomic.Bool
+		allowRestart := false
 		defer func() {
+			cancel()
+			if releaseLease != nil {
+				releaseLease()
+			}
 			s.piRunnerMu.Lock()
 			delete(s.piRunners, runID)
 			_, restart := s.piRunnerRestarts[runID]
 			delete(s.piRunnerRestarts, runID)
 			s.piRunnerMu.Unlock()
-			// 先登记新会话再 Done，关闭流程等待时不会漏掉刚恢复的会话。
-			if restart {
+			// 先释放租约、再登记新会话、最后 Done：避免同实例恢复撞上未释放的旧租约，也保证关闭流程等待完整。
+			if allowRestart && !leaseLost.Load() && restart {
 				s.startCloudAgentPi(userID, runID)
 			}
 			s.piRunnerWg.Done()
 		}()
 
-		if err := s.runCloudAgentPiSession(ctx, userID, runID); err != nil && !errors.Is(err, context.Canceled) {
+		acquiredAt := time.Now()
+		lease, acquired, err := s.acquireCloudAgentRunLeaseWithTTL(ctx, runID, leaseTTL)
+		if err != nil {
+			log.Printf("[Agent] acquire run lease failed run=%s: %v", runID, err)
+			return
+		}
+		if !acquired {
+			return
+		}
+		allowRestart = true
+		if lease != nil {
+			leaseDeadline := acquiredAt.Add(leaseTTL)
+			leaseStop := make(chan struct{})
+			leaseDone := make(chan struct{})
+			go func() {
+				defer close(leaseDone)
+				ticker := time.NewTicker(renewInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-leaseStop:
+						return
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						attemptAt := time.Now()
+						renewErr := lease.Renew(ctx)
+						if renewErr == nil {
+							leaseDeadline = attemptAt.Add(leaseTTL)
+							continue
+						}
+						if ctx.Err() != nil {
+							return
+						}
+						if !errors.Is(renewErr, platform.ErrSlotLeaseExpired) && time.Until(leaseDeadline) > renewInterval {
+							log.Printf("[Agent] renew run lease failed run=%s: %v", runID, renewErr)
+							continue
+						}
+						leaseLost.Store(true)
+						log.Printf("[Agent] run lease lost, aborting session run=%s: %v", runID, renewErr)
+						cancel()
+						return
+					}
+				}
+			}()
+			releaseLease = func() {
+				close(leaseStop)
+				<-leaseDone
+				lease.Release()
+			}
+		}
+
+		if err := s.runCloudAgentPiSession(ctx, userID, runID); err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil {
 			log.Printf("[Agent] session failed run=%s: %v", runID, err)
 			s.failPiRunner(runID, userID, errors.New(cloudAgentUserFailureMessage(runID, err)))
 		}
@@ -106,12 +188,17 @@ func (s *Service) closeCloudAgentPiRunners() {
 	if !s.piRunnersClosed {
 		s.piRunnersClosed = true
 	}
+	subStop := s.piCancelSubStop
+	s.piCancelSubStop = nil
 	cancels := make([]context.CancelFunc, 0, len(s.piRunners))
 	for _, cancel := range s.piRunners {
 		cancels = append(cancels, cancel)
 	}
 	s.piRunnerMu.Unlock()
 
+	if subStop != nil {
+		subStop()
+	}
 	for _, cancel := range cancels {
 		cancel()
 	}
@@ -207,13 +294,96 @@ func (s *Service) failPiRunner(runID, userID string, cause error) {
 	}
 }
 
-func (s *Service) stopCloudAgentPi(runID string) {
+func (s *Service) stopLocalCloudAgentPi(runID string) {
+	if s == nil || runID == "" {
+		return
+	}
 	s.piRunnerMu.Lock()
 	cancel := s.piRunners[runID]
+	delete(s.piRunnerRestarts, runID)
 	s.piRunnerMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (s *Service) stopCloudAgentPi(runID string) {
+	if s == nil || runID == "" {
+		return
+	}
+	s.stopLocalCloudAgentPi(runID)
+	if s.coordinator != nil && s.coordinator.HasRedis() {
+		pubCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.coordinator.Redis().Publish(pubCtx, cloudAgentCancelChannel, runID).Err(); err != nil {
+			log.Printf("[Agent] publish cancel failed run=%s: %v", runID, err)
+		}
+	}
+}
+
+func (s *Service) startCloudAgentCancelSubscriber() func() {
+	if s == nil || s.coordinator == nil || !s.coordinator.HasRedis() {
+		return func() {}
+	}
+	subCtx, subCancel := context.WithCancel(context.Background())
+	pubsub := s.coordinator.Redis().Subscribe(subCtx, cloudAgentCancelChannel)
+	initCtx, initCancel := context.WithTimeout(subCtx, 2*time.Second)
+	_, _ = pubsub.Receive(initCtx)
+	initCancel()
+
+	ch := pubsub.Channel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-subCtx.Done():
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				if msg == nil {
+					continue
+				}
+				if runID := strings.TrimSpace(msg.Payload); runID != "" {
+					s.stopLocalCloudAgentPi(runID)
+				}
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			subCancel()
+			_ = pubsub.Close()
+			<-done
+		})
+	}
+}
+
+func (s *Service) ensureCloudAgentCancelSubscriber() {
+	if s == nil || s.coordinator == nil || !s.coordinator.HasRedis() {
+		return
+	}
+	s.piRunnerMu.Lock()
+	if s.piRunnersClosed || s.piCancelSubStop != nil {
+		s.piRunnerMu.Unlock()
+		return
+	}
+	s.piRunnerMu.Unlock()
+
+	stop := s.startCloudAgentCancelSubscriber()
+
+	s.piRunnerMu.Lock()
+	if s.piRunnersClosed || s.piCancelSubStop != nil {
+		s.piRunnerMu.Unlock()
+		stop()
+		return
+	}
+	s.piCancelSubStop = stop
+	s.piRunnerMu.Unlock()
 }
 
 func (s *Service) recoverCloudAgentPiRunners() {

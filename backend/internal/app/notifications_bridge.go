@@ -84,5 +84,9 @@ func (s *Service) LoginVerification(req VerificationConfirm) (*AuthSessionResult
 	return s.authDomain().LoginVerification(req)
 }
 func (s *Service) BindVerification(actor *model.User, req VerificationConfirm) (*AuthUser, error) {
-	return s.authDomain().BindVerification(actor, req)
+	res, err := s.authDomain().BindVerification(actor, req)
+	if err == nil && actor != nil {
+		s.invalidateUserAuthCache(actor.ID)
+	}
+	return res, err
 }

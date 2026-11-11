@@ -115,12 +115,104 @@ func Run(ctx context.Context, request ProcessRequest, bridge Bridge) error {
 	return nil
 }
 
+// ResolveBridgeAdvertiseHost normalizes the callback host advertised to the
+// Agent runtime. Empty defaults to loopback for embedded processes; "auto"
+// selects a concrete non-loopback interface IP or hostname so multi-replica
+// deployments do not advertise a round-robin service DNS alias.
+func ResolveBridgeAdvertiseHost(bridgeHost string) string {
+	bridgeHost = strings.TrimSpace(bridgeHost)
+	if bridgeHost == "" {
+		return "127.0.0.1"
+	}
+	if strings.EqualFold(bridgeHost, "auto") {
+		return detectBridgeAdvertiseHost()
+	}
+	return bridgeHost
+}
+
+func detectBridgeAdvertiseHost() string {
+	var fallbackIPv6 string
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, addrErr := iface.Addrs()
+			if addrErr != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				ip := interfaceAddrIP(addr)
+				if !usableAdvertiseIP(ip) {
+					continue
+				}
+				if ip4 := ip.To4(); ip4 != nil {
+					return ip4.String()
+				}
+				if fallbackIPv6 == "" && ip.IsGlobalUnicast() {
+					fallbackIPv6 = ip.String()
+				}
+			}
+		}
+	}
+	if fallbackIPv6 != "" {
+		return fallbackIPv6
+	}
+	if host, err := os.Hostname(); err == nil {
+		host = strings.TrimSpace(host)
+		if validBridgeAdvertiseHost(host) {
+			return host
+		}
+	}
+	return "127.0.0.1"
+}
+
+func interfaceAddrIP(addr net.Addr) net.IP {
+	switch v := addr.(type) {
+	case *net.IPNet:
+		return v.IP
+	case *net.IPAddr:
+		return v.IP
+	default:
+		return nil
+	}
+}
+
+func usableAdvertiseIP(ip net.IP) bool {
+	return ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsUnspecified()
+}
+
+func validBridgeAdvertiseHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalMulticast()
+	}
+	if host[0] == '.' || host[0] == '-' || host[len(host)-1] == '.' || host[len(host)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		if !isBridgeHostnameByte(host[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isBridgeHostnameByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '.' || b == '-' || b == '_'
+}
+
 func StartBridge(listenAddr, advertiseHost string, bridge Bridge) (*BridgeServer, error) {
 	if bridge.Model == nil || bridge.Tool == nil || bridge.Event == nil {
 		return nil, errors.New("agent bridge handlers are incomplete")
 	}
 	advertiseHost = strings.TrimSpace(advertiseHost)
-	if advertiseHost == "" || strings.ContainsAny(advertiseHost, `:/\\ `) {
+	if strings.EqualFold(advertiseHost, "auto") {
+		advertiseHost = ResolveBridgeAdvertiseHost("auto")
+	}
+	if !validBridgeAdvertiseHost(advertiseHost) {
 		return nil, errors.New("agent bridge host must be a hostname or IP without a scheme or port")
 	}
 	tokenBytes := make([]byte, 32)
@@ -144,7 +236,7 @@ func StartBridge(listenAddr, advertiseHost string, bridge Bridge) (*BridgeServer
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 2 * time.Minute}
 	go func() { _ = server.Serve(listener) }()
 	return &BridgeServer{
-		URL:   fmt.Sprintf("http://%s:%d", advertiseHost, tcpAddr.Port),
+		URL:   "http://" + net.JoinHostPort(advertiseHost, strconv.Itoa(tcpAddr.Port)),
 		Token: token,
 		Close: func() { _ = server.Shutdown(context.Background()) },
 	}, nil

@@ -38,6 +38,8 @@ type Repository struct {
 	canvasEditProofs     []model.CanvasEditProof
 	canvasChangeNotifier func(string, string)
 	canvasChanges        map[canvasChange]struct{}
+	wakeNotifier         func(string)
+	wakeTopics           map[string]struct{}
 }
 
 type UserStorageUsage struct {
@@ -63,13 +65,34 @@ func (r *Repository) WithContext(ctx context.Context) *Repository {
 // Transaction exposes a repository scoped to one database transaction. Domain
 // services use it when a canvas mutation and its receipt must commit together.
 func (r *Repository) Transaction(fn func(*Repository) error) error {
-	changes := make(map[canvasChange]struct{})
+	changes := r.canvasChanges
+	if changes == nil {
+		changes = make(map[canvasChange]struct{})
+	}
+	wakes := r.wakeTopics
+	if wakes == nil {
+		wakes = make(map[string]struct{})
+	}
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		return fn(&Repository{db: tx, canvasEditProofs: r.canvasEditProofs, canvasChangeNotifier: r.canvasChangeNotifier, canvasChanges: changes})
+		return fn(&Repository{
+			db:                   tx,
+			canvasEditProofs:     r.canvasEditProofs,
+			canvasChangeNotifier: r.canvasChangeNotifier,
+			canvasChanges:        changes,
+			wakeNotifier:         r.wakeNotifier,
+			wakeTopics:           wakes,
+		})
 	})
 	if err == nil {
-		for change := range changes {
-			r.canvasChanged(change.userID, change.canvasID)
+		if r.canvasChanges == nil {
+			for change := range changes {
+				r.canvasChanged(change.userID, change.canvasID)
+			}
+		}
+		if r.wakeTopics == nil {
+			for topic := range wakes {
+				r.wakeChanged(topic)
+			}
 		}
 	}
 	return err

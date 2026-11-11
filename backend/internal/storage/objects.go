@@ -204,6 +204,10 @@ func SignedOriginObjectURL(setting Settings, objectKey string, expiresAt time.Ti
 	return signedOriginObjectURL(setting, objectKey, objectURLSigning{ExpiresAt: expiresAt})
 }
 
+func SignedOriginObjectThumbnailURL(setting Settings, objectKey string, expiresAt time.Time) (string, error) {
+	return signedOriginObjectURL(setting, objectKey, objectURLSigning{ExpiresAt: expiresAt, Thumbnail: true})
+}
+
 // SignedOriginObjectDisplayURL 签发浏览器展示用的源站直连地址。
 //
 // 浏览器 HTTP 缓存以完整 URL 为键。调用方把签名起始时间对齐到固定时间窗后，同一对象在
@@ -211,7 +215,15 @@ func SignedOriginObjectURL(setting Settings, objectKey string, expiresAt time.Ti
 // 不再每次都从对象存储重新下载。对象键带随机 ID、内容不可变，因此同时让对象存储按签名
 // 剩余有效期回写 Cache-Control，浏览器在有效期内连条件请求都不必发出。
 func SignedOriginObjectDisplayURL(setting Settings, objectKey string, signedAt time.Time, expiresAt time.Time) (string, error) {
-	signing := objectURLSigning{SignedAt: signedAt, ExpiresAt: expiresAt}
+	return signedOriginObjectDisplayURL(setting, objectKey, signedAt, expiresAt, false)
+}
+
+func SignedOriginObjectThumbnailDisplayURL(setting Settings, objectKey string, signedAt time.Time, expiresAt time.Time) (string, error) {
+	return signedOriginObjectDisplayURL(setting, objectKey, signedAt, expiresAt, true)
+}
+
+func signedOriginObjectDisplayURL(setting Settings, objectKey string, signedAt time.Time, expiresAt time.Time, thumbnail bool) (string, error) {
+	signing := objectURLSigning{SignedAt: signedAt, ExpiresAt: expiresAt, Thumbnail: thumbnail}
 	if seconds := int64(expiresAt.Sub(signingTime(signedAt)) / time.Second); seconds > 0 {
 		signing.CacheControl = "private, max-age=" + strconv.FormatInt(seconds, 10) + ", immutable"
 	}
@@ -225,6 +237,7 @@ type objectURLSigning struct {
 	ExpiresAt          time.Time
 	ContentDisposition string
 	CacheControl       string
+	Thumbnail          bool
 }
 
 func signingTime(signedAt time.Time) time.Time {
@@ -236,6 +249,9 @@ func signingTime(signedAt time.Time) time.Time {
 
 func signedOriginObjectURL(setting Settings, objectKey string, signing objectURLSigning) (string, error) {
 	setting = NormalizeSettings(setting)
+	if signing.Thumbnail && setting.Provider != aliyunOSSProvider && setting.Provider != tencentCOSProvider {
+		return "", errors.New("当前对象存储源站不支持云端缩略图直签")
+	}
 	if usesS3Protocol(setting.Provider) {
 		return signedS3ObjectURL(setting, objectKey, signing)
 	}
@@ -324,8 +340,8 @@ func signedAliyunOSSObjectURL(setting Settings, objectKey string, signing object
 	expires := strconv.FormatInt(expiresAt.UTC().Unix(), 10)
 	canonicalResource := "/" + setting.Bucket + "/" + objectKey
 	query := baseURL.Query()
-	// V1 签名要求 response-* 覆盖参数按字典序写入 CanonicalizedResource，且值不做转义。
-	overrides := make([]string, 0, 2)
+	// V1 签名要求 response-* 覆盖参数及 x-oss-process 子资源按字典序写入 CanonicalizedResource，且值不做转义。
+	overrides := make([]string, 0, 3)
 	if signing.CacheControl != "" {
 		query.Set("response-cache-control", signing.CacheControl)
 		overrides = append(overrides, "response-cache-control="+signing.CacheControl)
@@ -333,6 +349,10 @@ func signedAliyunOSSObjectURL(setting Settings, objectKey string, signing object
 	if signing.ContentDisposition != "" {
 		query.Set("response-content-disposition", signing.ContentDisposition)
 		overrides = append(overrides, "response-content-disposition="+signing.ContentDisposition)
+	}
+	if signing.Thumbnail {
+		query.Set("x-oss-process", aliyunOSSThumbnailProcess)
+		overrides = append(overrides, "x-oss-process="+aliyunOSSThumbnailProcess)
 	}
 	if len(overrides) > 0 {
 		canonicalResource += "?" + strings.Join(overrides, "&")
@@ -469,6 +489,9 @@ func signedCOSObjectURL(setting Settings, objectKey string, signing objectURLSig
 	if signing.ContentDisposition != "" {
 		query.Set("response-content-disposition", signing.ContentDisposition)
 	}
+	if signing.Thumbnail {
+		query.Add(tencentCOSThumbnailQuery, "")
+	}
 	// COS 默认用 time.Now 生成 q-sign-time；显式传入对齐后的时间窗，保证同一窗口内地址稳定。
 	options := &cos.PresignedURLOptions{Query: &query, AuthTime: &cos.AuthTime{SignStartTime: signedAt, SignEndTime: expiresAt, KeyStartTime: signedAt, KeyEndTime: expiresAt}}
 	signedURL, err := client.Object.GetPresignedURL(context.Background(), http.MethodGet, objectKey, setting.AccessKeyID, setting.AccessKeySecret, expiresAt.Sub(signedAt), options)
@@ -495,6 +518,25 @@ func SignedQiniuObjectURL(setting Settings, objectKey string, expiresAt time.Tim
 	}
 	mac := qiniuAuth.New(setting.AccessKeyID, setting.AccessKeySecret)
 	return qiniuStorage.MakePrivateURLv2(mac, strings.TrimRight(setting.CDNBaseURL, "/"), objectKey, deadline), nil
+}
+
+func signedQiniuCDNThumbnailURL(setting Settings, objectKey string, expiresAt time.Time) (string, error) {
+	if setting.AccessKeyID == "" || setting.AccessKeySecret == "" {
+		return "", errors.New("七牛云 Kodo 访问密钥不可用")
+	}
+	if _, err := OssCDNBaseURL(setting.CDNBaseURL); err != nil {
+		return "", err
+	}
+	objectKey = strings.TrimLeft(strings.TrimSpace(objectKey), "/")
+	if objectKey == "" {
+		return "", errors.New("七牛云 Kodo 对象路径为空")
+	}
+	deadline := expiresAt.Unix()
+	if deadline <= time.Now().Unix() {
+		return "", errors.New("七牛云 Kodo 签名有效期必须晚于当前时间")
+	}
+	mac := qiniuAuth.New(setting.AccessKeyID, setting.AccessKeySecret)
+	return qiniuStorage.MakePrivateURLv2WithQueryString(mac, strings.TrimRight(setting.CDNBaseURL, "/"), objectKey, qiniuDoraThumbnailQuery, deadline), nil
 }
 
 // SignedQiniuS3ObjectURL 用七牛兼容 S3 的 AWS Signature V4 访问私有空间。

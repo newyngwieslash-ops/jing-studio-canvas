@@ -182,12 +182,15 @@ func RegisterTaskRoutes(r *gin.RouterGroup, svc *service.Service) {
 			fail(c, http.StatusBadRequest, err)
 			return
 		}
-		initial, err := svc.CachedTaskTextReplay(c.Request.Context(), user.ID, c.Param("id"), after)
+		taskID := c.Param("id")
+		wakeCh, unsub := svc.SubscribeWake("task-text:" + taskID)
+		defer unsub()
+		initial, err := svc.FreshTaskTextReplay(c.Request.Context(), user.ID, taskID, after)
 		if err != nil {
 			failService(c, err)
 			return
 		}
-		streamTaskTextEvents(c, svc, user.ID, c.Param("id"), after, initial)
+		streamTaskTextEvents(c, svc, user.ID, taskID, after, initial, wakeCh)
 	})
 	r.POST("/tasks/:id/retry", func(c *gin.Context) {
 		user, err := currentUser(c, svc)
@@ -304,7 +307,7 @@ func taskTextEventCursor(c *gin.Context) (int64, error) {
 	return cursor, nil
 }
 
-func streamTaskTextEvents(c *gin.Context, svc *service.Service, userID string, taskID string, after int64, replay *service.TextReplayResult) {
+func streamTaskTextEvents(c *gin.Context, svc *service.Service, userID string, taskID string, after int64, replay *service.TextReplayResult, wakeCh <-chan struct{}) {
 	c.Header("Content-Type", "text/event-stream; charset=utf-8")
 	c.Header("Cache-Control", "no-cache, no-transform")
 	c.Header("Connection", "keep-alive")
@@ -319,7 +322,7 @@ func streamTaskTextEvents(c *gin.Context, svc *service.Service, userID string, t
 	lastProgress := replay.Progress
 	writeTaskTextSSE(c, "progress", 0, map[string]any{"status": replay.Status, "stage": replay.Stage, "progress": replay.Progress})
 
-	pollTicker := time.NewTicker(750 * time.Millisecond)
+	pollTicker := time.NewTicker(5 * time.Second)
 	heartbeatTicker := time.NewTicker(15 * time.Second)
 	defer pollTicker.Stop()
 	defer heartbeatTicker.Stop()
@@ -332,6 +335,7 @@ func streamTaskTextEvents(c *gin.Context, svc *service.Service, userID string, t
 			writeTaskTextSSE(c, "terminal", 0, replay)
 			return
 		}
+		fresh := false
 		select {
 		case <-c.Request.Context().Done():
 			return
@@ -340,9 +344,20 @@ func streamTaskTextEvents(c *gin.Context, svc *service.Service, userID string, t
 				return
 			}
 			c.Writer.Flush()
+			continue
+		case <-wakeCh:
+			fresh = true
 		case <-pollTicker.C:
 		}
-		next, err := svc.CachedTaskTextReplay(c.Request.Context(), userID, taskID, after)
+		var (
+			next *service.TextReplayResult
+			err  error
+		)
+		if fresh {
+			next, err = svc.FreshTaskTextReplay(c.Request.Context(), userID, taskID, after)
+		} else {
+			next, err = svc.CachedTaskTextReplay(c.Request.Context(), userID, taskID, after)
+		}
 		if err != nil {
 			writeTaskTextSSE(c, "error", 0, map[string]string{"message": "任务文本流不可用"})
 			return

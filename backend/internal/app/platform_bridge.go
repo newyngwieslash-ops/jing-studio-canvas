@@ -153,6 +153,49 @@ func (s *Service) RecordChannelResult(ctx context.Context, channelID string, fai
 	return s.platformDomain().RecordChannelResult(ctx, channelID, failed)
 }
 
+func (s *Service) ensureWakeHub() *platform.WakeHub {
+	if s == nil {
+		return nil
+	}
+	s.workerRuntimeMu.Lock()
+	defer s.workerRuntimeMu.Unlock()
+	if s.wakeClosed {
+		return nil
+	}
+	if s.wakeHub == nil {
+		if s.coordinator != nil {
+			s.wakeHub = platform.NewWakeHub(s.coordinator.Redis())
+		} else {
+			s.wakeHub = platform.NewWakeHub(nil)
+		}
+	}
+	return s.wakeHub
+}
+
+func (s *Service) SubscribeWake(topic string) (<-chan struct{}, func()) {
+	hub := s.ensureWakeHub()
+	if hub == nil {
+		ch := make(chan struct{}, 1)
+		return ch, func() {}
+	}
+	return hub.Subscribe(topic)
+}
+
+func (s *Service) NotifyWake(topic string) {
+	if hub := s.ensureWakeHub(); hub != nil {
+		hub.Notify(topic)
+	}
+}
+
+func (s *Service) notifyWakeFallback(topic string) {
+	if s == nil || topic == "" {
+		return
+	}
+	if s.repo == nil || !s.repo.HasWakeNotifier() {
+		s.NotifyWake(topic)
+	}
+}
+
 func (s *Service) Close() error {
 	if s == nil {
 		return nil
@@ -161,6 +204,17 @@ func (s *Service) Close() error {
 	s.closeCloudAgentApprovalFollowUps()
 	s.closeCloudAgentPiRunners()
 	s.closeApprovedCloudAgentMediaWaiters()
+	s.closePlaybackTranscodes()
+	if s.canvasRealtime != nil {
+		s.canvasRealtime.Close()
+	}
+	s.workerRuntimeMu.Lock()
+	s.wakeClosed = true
+	wakeHub := s.wakeHub
+	s.workerRuntimeMu.Unlock()
+	if wakeHub != nil {
+		wakeHub.Close()
+	}
 	if s.coordinator == nil {
 		return nil
 	}

@@ -96,7 +96,7 @@ func (r *Repository) RevokeAuthSessionWithLog(sessionID, tokenHash string, event
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		deleted := tx.Where("id = ? AND token_hash = ? AND expires_at = ?", session.ID, tokenHash, session.ExpiresAt).Delete(&model.AuthSession{})
+		deleted := tx.Where("id = ? AND token_hash = ?", session.ID, tokenHash).Delete(&model.AuthSession{})
 		if deleted.Error != nil {
 			return deleted.Error
 		}

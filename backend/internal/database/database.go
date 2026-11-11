@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"yingce/backend/internal/logging"
 
@@ -99,14 +101,68 @@ func normalizeSQLiteDSN(dsn string) string {
 	return base + "?" + rawQuery + "&" + strings.Join(additions, "&")
 }
 
+type postgresPoolConfig struct {
+	maxOpenConns    int
+	maxIdleConns    int
+	connMaxLifetime time.Duration
+	connMaxIdleTime time.Duration
+}
+
+func parsePostgresPoolConfig(getenv func(string) string) postgresPoolConfig {
+	cfg := postgresPoolConfig{
+		maxOpenConns:    50,
+		maxIdleConns:    25,
+		connMaxLifetime: 30 * time.Minute,
+		connMaxIdleTime: 10 * time.Minute,
+	}
+	if getenv == nil {
+		return cfg
+	}
+	if raw := strings.TrimSpace(getenv("CANVAS_DB_MAX_OPEN_CONNS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 1 {
+			cfg.maxOpenConns = min(parsed, 500)
+		}
+	}
+	if raw := strings.TrimSpace(getenv("CANVAS_DB_MAX_IDLE_CONNS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
+			cfg.maxIdleConns = parsed
+		}
+	}
+	cfg.maxIdleConns = min(cfg.maxIdleConns, cfg.maxOpenConns)
+
+	cfg.connMaxLifetime = parsePositivePoolDuration(getenv("CANVAS_DB_CONN_MAX_LIFETIME"), cfg.connMaxLifetime)
+	cfg.connMaxIdleTime = parsePositivePoolDuration(getenv("CANVAS_DB_CONN_MAX_IDLE_TIME"), cfg.connMaxIdleTime)
+	if cfg.connMaxLifetime > 0 && cfg.connMaxIdleTime > cfg.connMaxLifetime {
+		cfg.connMaxIdleTime = cfg.connMaxLifetime
+	}
+	return cfg
+}
+
+func parsePositivePoolDuration(raw string, fallback time.Duration) time.Duration {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fallback
+	}
+	if d, err := time.ParseDuration(trimmed); err == nil && d > 0 {
+		return d
+	}
+	if secs, err := strconv.Atoi(trimmed); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return fallback
+}
+
 func ConfigurePool(db *gorm.DB) error {
 	sqlDB, err := db.DB()
 	if err != nil {
 		return err
 	}
 	if db.Dialector.Name() == "postgres" {
-		sqlDB.SetMaxOpenConns(30)
-		sqlDB.SetMaxIdleConns(10)
+		cfg := parsePostgresPoolConfig(os.Getenv)
+		sqlDB.SetMaxOpenConns(cfg.maxOpenConns)
+		sqlDB.SetMaxIdleConns(cfg.maxIdleConns)
+		sqlDB.SetConnMaxLifetime(cfg.connMaxLifetime)
+		sqlDB.SetConnMaxIdleTime(cfg.connMaxIdleTime)
 		return nil
 	}
 	sqlDB.SetMaxOpenConns(8)

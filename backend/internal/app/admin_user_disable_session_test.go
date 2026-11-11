@@ -1,18 +1,22 @@
 package app
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"yingce/backend/internal/database"
 	"yingce/backend/internal/model"
 	"yingce/backend/internal/repository"
-
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
 func TestUpdateUserDisableRevokesSessions(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	sanitizedName := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	db, err := database.Open(database.Config{
+		Driver: "sqlite",
+		DSN:    fmt.Sprintf("file:%s_%d?mode=memory&cache=shared", sanitizedName, time.Now().UnixNano()),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,8 +52,16 @@ func TestUpdateUserDisableRevokesSessions(t *testing.T) {
 	if _, err := svc.CurrentUser("one.token-one"); err != nil {
 		t.Fatalf("profile edit revoked session: %v", err)
 	}
+	if _, err := svc.CurrentUser("two.token-two"); err != nil {
+		t.Fatalf("second session failed before disable: %v", err)
+	}
 	if _, err := svc.UpdateUser(actor, user.ID, UpdateUserRequest{Status: model.UserStatusDisabled}); err != nil {
 		t.Fatal(err)
+	}
+	for _, cookie := range []string{"one.token-one", "two.token-two"} {
+		if _, err := svc.CurrentUser(cookie); err == nil {
+			t.Errorf("disabled user session served from cache: %s", cookie)
+		}
 	}
 	var count int64
 	if err := db.Model(&model.AuthSession{}).Where("user_id = ?", user.ID).Count(&count).Error; err != nil {

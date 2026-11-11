@@ -439,19 +439,9 @@ func (s *Service) SetDramaCastImage(userID, projectID, castID string, req SetDra
 	if err != nil {
 		return nil, err
 	}
-	resourceID := strings.TrimSpace(req.ResourceID)
-	if resourceID == "" {
-		return nil, BadAuthRequest("请先上传图片")
-	}
-	resource, err := s.repo.ResourceForUser(userID, resourceID)
+	resource, err := s.dramaUserImage(userID, req.ResourceID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, BadAuthRequest("图片不存在或无权使用")
-		}
 		return nil, err
-	}
-	if resource.Status != model.ResourceStatusReady || !strings.HasPrefix(resource.MimeType, "image/") {
-		return nil, BadAuthRequest("请上传已完成的图片文件")
 	}
 	source := strings.TrimSpace(req.Source)
 	if source != "" && source != "upload" && source != "canvas" {
@@ -494,6 +484,120 @@ func (s *Service) SetDramaCastImage(userID, projectID, castID string, req SetDra
 		return nil, err
 	}
 	return map[string]any{"cast": updated, "affectedSegments": affected}, nil
+}
+
+// dramaUserImage 校验资源属于当前用户、已就绪且是图片。
+func (s *Service) dramaUserImage(userID, resourceID string) (*model.Resource, error) {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return nil, BadAuthRequest("请先上传图片")
+	}
+	resource, err := s.repo.ResourceForUser(userID, resourceID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, BadAuthRequest("图片不存在或无权使用")
+		}
+		return nil, err
+	}
+	if resource.Status != model.ResourceStatusReady || !strings.HasPrefix(resource.MimeType, "image/") {
+		return nil, BadAuthRequest("请上传已完成的图片文件")
+	}
+	return resource, nil
+}
+
+// SetDramaCastFace 为角色本体指定或清除人脸参考图。指定后解锁并重新生成参考图（旧图保留在版本记录），
+// 造型以角色本体参考图为底图，随后重做造型即可沿用同一张脸。清除只去掉人脸参考，不重新生成。
+func (s *Service) SetDramaCastFace(userID, projectID, castID string, req SetDramaCastFaceRequest) (map[string]any, error) {
+	project, _, err := s.dramaForUser(userID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	cast, err := s.repo.DramaCast(project.ID, castID)
+	if err != nil {
+		return nil, err
+	}
+	if cast.Kind != "character" || cast.ParentID != "" {
+		return nil, BadAuthRequest("只能为角色指定人脸参考，造型沿用所属角色的脸")
+	}
+	if strings.TrimSpace(req.ResourceID) == "" {
+		if err := s.repo.UpdateDramaCastFields(cast.ID, map[string]any{"face_resource_id": ""}); err != nil {
+			return nil, err
+		}
+		return map[string]any{"affectedSegments": 0}, nil
+	}
+	resource, err := s.dramaUserImage(userID, req.ResourceID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.UpdateDramaCastFields(cast.ID, map[string]any{"face_resource_id": resource.ID, "locked": false}); err != nil {
+		return nil, err
+	}
+	return s.RegenerateDramaCast(userID, projectID, cast.ID, req.RestyleSegments)
+}
+
+// dramaRecoverableCastJob 取设定最近一次参考图作业；作业失败、且它的任务是“作品已生成但保存失败”
+// （留有恢复信息，可重新保存而不重新生成）时 ok=true。
+func (s *Service) dramaRecoverableCastJob(projectID, castID string) (*model.DramaJob, bool, error) {
+	job, err := s.repo.LatestDramaCastJob(projectID, castID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if job.Status != model.DramaJobFailed || job.TaskID == "" {
+		return job, false, nil
+	}
+	task, err := s.repo.Task(job.TaskID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return job, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return job, task.Status == model.TaskStatusFailed && task.MediaRecoveryJSON != "", nil
+}
+
+// RecoverDramaCastImage 重新保存“已生成但保存失败”的参考图：沿用原任务重新登记作品，不重新生成、不重复扣费。
+// 作业回到运行中，任务保存成功后照常成为当前参考图；再次失败时设定重新标记失败。
+func (s *Service) RecoverDramaCastImage(userID, projectID, castID string) (map[string]any, error) {
+	project, productionRow, err := s.dramaForUser(userID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	cast, err := s.repo.DramaCast(project.ID, castID)
+	if err != nil {
+		return nil, err
+	}
+	if cast.Locked || cast.ImageStatus != model.DramaMediaFailed {
+		return nil, BadAuthRequest("参考图当前不是保存失败状态，无需恢复")
+	}
+	job, ok, err := s.dramaRecoverableCastJob(project.ID, cast.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, BadAuthRequest("没有可恢复的作品，请重新生成参考图")
+	}
+	if _, err := s.RecoverTaskMedia(userID, job.TaskID); err != nil {
+		return nil, err
+	}
+	// 只在设定仍处于失败时接管；期间用户已重新生成或上传则不覆盖，恢复的图仍会进素材库。
+	changed, err := s.repo.UpdateDramaCastIf(cast.ID, []string{model.DramaMediaFailed}, map[string]any{"image_status": model.DramaMediaRunning})
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		return nil, BadAuthRequest("设定已变化，请刷新后查看")
+	}
+	job.Status, job.Error, job.FinishedAt = model.DramaJobRunning, "", nil
+	if err := s.repo.SaveDramaJob(job); err != nil {
+		return nil, err
+	}
+	if err := s.requestDramaWork(productionRow); err != nil {
+		return nil, err
+	}
+	return map[string]any{"taskId": job.TaskID}, nil
 }
 
 // dramaDialogueCheck 逐句核对原文台词是否出现在镜头台词里。章节被多集共用时无法确定哪些台词属于本集，不做核对。

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,5 +101,76 @@ if (process.env.DATABASE_URL) {
 			t.Fatal("backend environment leaked into the Agent runtime")
 		}
 		t.Fatal(err)
+	}
+}
+
+func TestResolveBridgeAdvertiseHostPrefersExplicitAndAutoDetects(t *testing.T) {
+	if got := ResolveBridgeAdvertiseHost(""); got != "127.0.0.1" {
+		t.Fatalf("empty host = %q, want 127.0.0.1", got)
+	}
+	if got := ResolveBridgeAdvertiseHost("   "); got != "127.0.0.1" {
+		t.Fatalf("whitespace host = %q, want 127.0.0.1", got)
+	}
+	if got := ResolveBridgeAdvertiseHost("10.24.36.48"); got != "10.24.36.48" {
+		t.Fatalf("explicit IPv4 = %q, want 10.24.36.48", got)
+	}
+	if got := ResolveBridgeAdvertiseHost("replica-1.internal"); got != "replica-1.internal" {
+		t.Fatalf("explicit hostname = %q, want replica-1.internal", got)
+	}
+
+	autoHost := ResolveBridgeAdvertiseHost("auto")
+	if autoHost == "" || strings.EqualFold(autoHost, "auto") || strings.EqualFold(autoHost, "backend") || autoHost == "0.0.0.0" || autoHost == "::" {
+		t.Fatalf("auto host resolved to unusable value %q", autoHost)
+	}
+	if got := ResolveBridgeAdvertiseHost("AUTO"); got != autoHost {
+		t.Fatalf("case-insensitive AUTO = %q, want %q", got, autoHost)
+	}
+
+	server, err := StartBridge("127.0.0.1:0", "auto", noopBridge())
+	if err != nil {
+		t.Fatalf("StartBridge(auto) failed: %v", err)
+	}
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse bridge URL %q: %v", server.URL, err)
+	}
+	if parsed.Scheme != "http" || parsed.Hostname() == "" || strings.EqualFold(parsed.Hostname(), "auto") || parsed.Port() == "" {
+		t.Fatalf("unexpected auto bridge URL: %q", server.URL)
+	}
+
+	v6Server, err := StartBridge("127.0.0.1:0", "2001:db8::1", noopBridge())
+	if err != nil {
+		t.Fatalf("StartBridge(IPv6) failed: %v", err)
+	}
+	defer v6Server.Close()
+	if !strings.HasPrefix(v6Server.URL, "http://[2001:db8::1]:") {
+		t.Fatalf("IPv6 bridge URL = %q, want bracketed host:port", v6Server.URL)
+	}
+
+	for _, invalid := range []string{
+		"",
+		"0.0.0.0",
+		"::",
+		"224.0.0.1",
+		"fe80::1%eth0",
+		"http://bad:8080",
+		"bad:8080",
+		"bad/path",
+		"bad host",
+		"bad?query",
+		"bad#frag",
+		"user@host",
+		"[::1]",
+		"bad\thost",
+		".leading-dot",
+		"trailing-dot.",
+		"-leading-dash",
+		"trailing-dash-",
+	} {
+		if badServer, err := StartBridge("127.0.0.1:0", invalid, noopBridge()); err == nil {
+			badServer.Close()
+			t.Fatalf("StartBridge(%q) succeeded unexpectedly", invalid)
+		}
 	}
 }

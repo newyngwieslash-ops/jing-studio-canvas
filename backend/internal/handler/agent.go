@@ -375,8 +375,11 @@ func RegisterAgentRoutes(r *gin.RouterGroup, svc *service.Service) {
 			fail(c, 400, err)
 			return
 		}
+		runID := c.Param("id")
+		wakeCh, unsub := svc.SubscribeWake("agent-run:" + runID)
+		defer unsub()
 		options := service.CloudAgentRunViewOptions{SinceSeq: int(after)}
-		run, err := svc.CloudAgentRun(user.ID, c.Param("id"), options)
+		run, err := svc.CloudAgentRun(user.ID, runID, options)
 		if err != nil {
 			failService(c, err)
 			return
@@ -384,7 +387,7 @@ func RegisterAgentRoutes(r *gin.RouterGroup, svc *service.Service) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("X-Accel-Buffering", "no")
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		revision := run.Revision
 		lastWrite := time.Now()
@@ -401,6 +404,7 @@ func RegisterAgentRoutes(r *gin.RouterGroup, svc *service.Service) {
 						after = int64(event.Seq)
 					}
 				}
+				options.SinceSeq = int(after)
 				// Snapshots are state observations, not replayable Agent events; they
 				// intentionally have no SSE id and therefore never advance the cursor.
 				snapshot := *run
@@ -418,8 +422,10 @@ func RegisterAgentRoutes(r *gin.RouterGroup, svc *service.Service) {
 			select {
 			case <-c.Request.Context().Done():
 				return
+			case <-wakeCh:
+				run, err = svc.CloudAgentRunIfChanged(user.ID, runID, revision, options)
 			case <-ticker.C:
-				run, err = svc.CloudAgentRunIfChanged(user.ID, c.Param("id"), revision, options)
+				run, err = svc.CloudAgentRunIfChanged(user.ID, runID, revision, options)
 			}
 		}
 	})

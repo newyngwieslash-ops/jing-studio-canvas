@@ -19,3 +19,24 @@ func (r *Repository) canvasChanged(userID, canvasID string) {
 	}
 	r.canvasChangeNotifier(userID, canvasID)
 }
+
+func (r *Repository) WithWakeNotifier(notify func(string)) *Repository {
+	copy := *r
+	copy.wakeNotifier = notify
+	return &copy
+}
+
+func (r *Repository) HasWakeNotifier() bool {
+	return r != nil && r.wakeNotifier != nil
+}
+
+func (r *Repository) wakeChanged(topic string) {
+	if r == nil || r.wakeNotifier == nil || topic == "" {
+		return
+	}
+	if r.wakeTopics != nil {
+		r.wakeTopics[topic] = struct{}{}
+		return
+	}
+	r.wakeNotifier(topic)
+}

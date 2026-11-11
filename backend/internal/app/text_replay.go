@@ -74,6 +74,7 @@ func (s *Service) CompleteTextReplayTask(userID string, taskID string, text stri
 	if compactErr := s.finalizeTaskTextReplay(taskID, model.TaskStatusSucceeded); compactErr != nil {
 		_ = s.log(userID, taskID, "error", "文本回放窗口更新失败", compactErr.Error())
 	}
+	s.notifyWakeFallback("task-text:" + taskID)
 	return s.repo.TaskForUser(userID, taskID)
 }
 
@@ -99,6 +100,9 @@ func (s *Service) AppendTaskTextDelta(userID string, taskID string, content stri
 	}
 	if errors.Is(err, repository.ErrTextReplayClosed) {
 		return nil, BadAuthRequest("已结束任务不能继续写入文本增量")
+	}
+	if err == nil {
+		s.notifyWakeFallback("task-text:" + taskID)
 	}
 	return item, err
 }

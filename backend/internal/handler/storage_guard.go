@@ -41,6 +41,8 @@ var storageReadOnlyExemptRoutes = map[string]struct{}{
 	"/tasks/:id/text-replay-complete": {},
 	"/agent/runs/:id/cancel":          {},
 	"/dramas/:id/pause":               {},
+	// 与 /tasks/:id/recover-media 相同：重新保存已生成并已扣费的参考图。
+	"/dramas/:id/cast/:castId/recover": {},
 	// 导出只读取已有资源，超容量只读时仍允许用户把作品带走。
 	"/dramas/:id/episodes/:episodeId/jianying-draft": {},
 	"/dramas/:id/asset-package":                      {},

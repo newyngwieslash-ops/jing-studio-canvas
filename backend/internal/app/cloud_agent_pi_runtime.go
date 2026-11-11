@@ -43,7 +43,11 @@ func runCloudAgentPi(ctx context.Context, request cloudAgentPiProcessRequest, br
 		Compaction: request.Compaction, Permissions: request.Permissions, Model: request.Model,
 	}
 	if endpoint := strings.TrimSpace(os.Getenv("YINGCE_AGENT_URL")); endpoint != "" {
-		return yingceagent.Run(ctx, endpoint, os.Getenv("YINGCE_AGENT_TOKEN"), os.Getenv("YINGCE_AGENT_BRIDGE_HOST"), runtimeRequest, agentruntime.Bridge(bridge))
+		bridgeHost := strings.TrimSpace(os.Getenv("YINGCE_AGENT_BRIDGE_HOST"))
+		if bridgeHost == "" || strings.EqualFold(bridgeHost, "backend") {
+			bridgeHost = "auto"
+		}
+		return yingceagent.Run(ctx, endpoint, os.Getenv("YINGCE_AGENT_TOKEN"), bridgeHost, runtimeRequest, agentruntime.Bridge(bridge))
 	}
 	return agentruntime.Run(ctx, runtimeRequest, agentruntime.Bridge(bridge))
 }

@@ -133,3 +133,31 @@ func TestReadCachePanicDoesNotLeakCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadCacheDeleteEvictsLoadedAndInFlightKey(t *testing.T) {
+	cache := NewBoundedReadCache[string, int](4, 1024, 2, time.Minute)
+	if v, err := cache.Get(context.Background(), "k1", func(context.Context) (int, int, error) { return 10, 256, nil }); err != nil || v != 10 {
+		t.Fatalf("initial Get = (%d, %v)", v, err)
+	}
+	cache.Delete("k1")
+	if v, err := cache.Get(context.Background(), "k1", func(context.Context) (int, int, error) { return 20, 256, nil }); err != nil || v != 20 {
+		t.Fatalf("after Delete Get = (%d, %v), want (20, nil)", v, err)
+	}
+
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = cache.Get(context.Background(), "inflight", func(context.Context) (int, int, error) {
+			close(started)
+			<-release
+			return 1, 256, nil
+		})
+	}()
+	<-started
+	cache.Delete("inflight")
+	close(release)
+	<-done
+	if v, err := cache.Get(context.Background(), "inflight", func(context.Context) (int, int, error) { return 2, 256, nil }); err != nil || v != 2 {
+		t.Fatalf("in-flight deleted key retained stale value: (%d, %v)", v, err)
+	}
+}

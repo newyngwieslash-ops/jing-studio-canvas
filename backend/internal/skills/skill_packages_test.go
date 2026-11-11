@@ -166,9 +166,9 @@ func TestArchiveFromZipNormalizesWrapperAndNestedFiles(t *testing.T) {
 func TestArchiveFromZipSkipsOversizedNonAgentFiles(t *testing.T) {
 	oversized := strings.Repeat("x", maxSkillFileBytes+1)
 	archive, err := archiveFromZip(skillZip(t, map[string]string{
-		"director/SKILL.md":   "# AI 导演\n\n导演工作流",
-		"director/demo.mp4":   oversized,
-		"director/notes.md":   "# Notes",
+		"director/SKILL.md": "# AI 导演\n\n导演工作流",
+		"director/demo.mp4": oversized,
+		"director/notes.md": "# Notes",
 	}), "")
 	if err != nil {
 		t.Fatal(err)
@@ -189,11 +189,11 @@ func TestArchiveFromZipSkipsOversizedNonAgentFiles(t *testing.T) {
 
 func TestArchiveFromZipNormalizesMultiSkillSuiteWithController(t *testing.T) {
 	data := skillZip(t, map[string]string{
-		"manju-suite-main/short-drama-director/SKILL.md":        "---\nname: short-drama-director\nversion: \"7.4.26\"\ndescription: 总控技能\n---\n# 总控\n调度 sd-script-engine/SKILL.md 与 sd-shot-engine/SKILL.md，读取 references/gate.md\n",
+		"manju-suite-main/short-drama-director/SKILL.md":           "---\nname: short-drama-director\nversion: \"7.4.26\"\ndescription: 总控技能\n---\n# 总控\n调度 sd-script-engine/SKILL.md 与 sd-shot-engine/SKILL.md，读取 references/gate.md\n",
 		"manju-suite-main/short-drama-director/references/gate.md": "# Gate",
-		"manju-suite-main/sd-script-engine/SKILL.md":            "---\nname: sd-script-engine\ndescription: 剧本子技能\n---\n由 short-drama-director 调度\n",
-		"manju-suite-main/sd-shot-engine/SKILL.md":              "---\nname: sd-shot-engine\ndescription: 分镜子技能\n---\n由 short-drama-director 调度\n",
-		"manju-suite-main/assets/demo.md":                       "# Demo",
+		"manju-suite-main/sd-script-engine/SKILL.md":               "---\nname: sd-script-engine\ndescription: 剧本子技能\n---\n由 short-drama-director 调度\n",
+		"manju-suite-main/sd-shot-engine/SKILL.md":                 "---\nname: sd-shot-engine\ndescription: 分镜子技能\n---\n由 short-drama-director 调度\n",
+		"manju-suite-main/assets/demo.md":                          "# Demo",
 	})
 	for _, subdir := range []string{"", "short-drama-director"} {
 		archive, err := archiveFromZip(data, subdir)

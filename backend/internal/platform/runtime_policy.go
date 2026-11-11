@@ -15,15 +15,16 @@ import (
 const runtimePolicySettingKey = "runtime_policy"
 
 const (
-	maxRuntimeUploadMB        int64 = 999
-	maxRuntimeStorageGB       int64 = 999
-	maxRuntimeDataMB          int64 = 999_999
-	maxRuntimeCount           int64 = 999_999_999
-	maxRuntimeRate                  = 999_999
-	maxRuntimeConcurrency           = 999
-	maxRuntimeTimeoutMinutes        = 9_999
-	defaultWorkerConcurrency        = 8
-	defaultChannelConcurrency       = 8
+	maxRuntimeUploadMB           int64 = 999
+	maxRuntimeStorageGB          int64 = 999
+	maxRuntimeDataMB             int64 = 999_999
+	maxRuntimeCount              int64 = 999_999_999
+	maxRuntimeRate                     = 999_999
+	maxRuntimeConcurrency              = 999
+	maxRuntimeTimeoutMinutes           = 9_999
+	defaultWorkerConcurrency           = 8
+	defaultChannelConcurrency          = 8
+	defaultActiveTaskConcurrency       = 5
 )
 
 // 画布 Agent 单步的输出上限与执行时限。上限是"每次模型调用"的边界（思考 + 正文 + 工具参数），
@@ -46,6 +47,10 @@ const (
 func agentStepMaxOutputTokensDefault() int {
 	value := envInt("CANVAS_AGENT_STEP_MAX_OUTPUT_TOKENS", DefaultRuntimeAgentStepOutputTokens)
 	return min(max(value, MinRuntimeAgentStepOutputTokens), MaxRuntimeAgentStepOutputTokens)
+}
+
+func defaultActiveTaskLimit() int {
+	return min(envInt("CANVAS_USER_TASK_CONCURRENCY", defaultActiveTaskConcurrency), maxRuntimeConcurrency)
 }
 
 func agentStepTimeoutSecondsDefault() int {
@@ -170,7 +175,7 @@ func DefaultRuntimePolicy() RuntimePolicySetting {
 		Task: RuntimeTaskPolicy{
 			WorkerConcurrency:        defaultWorkerConcurrencyLimit(),
 			ChannelConcurrency:       defaultChannelConcurrencyLimit(),
-			ActiveTaskLimit:          5,
+			ActiveTaskLimit:          defaultActiveTaskLimit(),
 			ImageTimeoutMinutes:      8,
 			TextTimeoutMinutes:       8,
 			AudioTimeoutMinutes:      8,
@@ -497,6 +502,3 @@ func publicRuntimePolicy(setting *model.SystemSetting, value RuntimePolicySettin
 	}
 	return result
 }
-
-func megabytes(value int64) int64 { return kernel.Megabytes(value) }
-func gigabytes(value int64) int64 { return kernel.Gigabytes(value) }
